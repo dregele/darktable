@@ -188,6 +188,12 @@ static void _zoom_live_view_clicked(GtkWidget *widget, gpointer user_data)
   }
 }
 
+static gboolean _sony_af_halfpress_end(gpointer user_data)
+{
+  dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 0);
+  return G_SOURCE_REMOVE;
+}
+
 static void _auto_focus_button_clicked(GtkWidget *widget, gpointer user_data)
 {
   const char *property = "autofocusdrive";
@@ -195,8 +201,19 @@ static void _auto_focus_button_clicked(GtkWidget *widget, gpointer user_data)
   if(dt_camctl_camera_get_property_type(darktable.camctl, NULL,
                                         property, &property_type))
   {
-    dt_print(DT_DEBUG_CAMCTL,
-             "[camera control] unable to get property type for %s", property);
+    // Sony bodies don't expose a dedicated "run autofocus" property;
+    // they only support triggering AF through shutter half-press
+    // emulation, so that's the only fallback path we try
+    if(dt_camctl_camera_property_exists(darktable.camctl, NULL, "autofocus"))
+    {
+      dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 1);
+      g_timeout_add(300, _sony_af_halfpress_end, NULL);
+    }
+    else
+    {
+      dt_print(DT_DEBUG_CAMCTL,
+               "[camera control] unable to get property type for %s", property);
+    }
   }
   else
   {
@@ -221,10 +238,29 @@ static void _focus_button_clicked(GtkWidget *widget, gpointer user_data)
   if(dt_camctl_camera_get_property_type(darktable.camctl, NULL,
                                         "manualfocusdrive", &property_type))
   {
-    // default to avoid breaking backwards compatibility
-    // note that this might not work on non-Canon EOS cameras
-    dt_camctl_camera_set_property_choice(darktable.camctl, NULL,
-                                         "manualfocusdrive", focus);
+    // Sony: no "manualfocusdrive" property, use the manual focus step
+    // action instead (nonzero -7..-1 near / 1..7 far, magnitude = step)
+    if(dt_camctl_camera_property_exists(darktable.camctl, NULL, "manualfocus"))
+    {
+      int step;
+      switch(focus)
+      {
+        case DT_FOCUS_NEARER: step = -3; break;
+        case DT_FOCUS_NEAR:   step = -1; break;
+        case DT_FOCUS_FAR:    step = 1;  break;
+        case DT_FOCUS_FARTHER: step = 3; break;
+        default: step = 0;
+      }
+      if(step != 0)
+        dt_camctl_camera_set_property_float(darktable.camctl, NULL, "manualfocus", step);
+    }
+    else
+    {
+      // default to avoid breaking backwards compatibility
+      // note that this might not work on non-Canon EOS cameras
+      dt_camctl_camera_set_property_choice(darktable.camctl, NULL,
+                                           "manualfocusdrive", focus);
+    }
   }
   else
   {
