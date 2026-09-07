@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2012-2025 darktable developers.
+    Copyright (C) 2012-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -34,9 +34,11 @@
 #include "imageio/imageio_common.h"
 #include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -365,12 +367,19 @@ int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, co
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
 
   /* export image to file */
-  dt_imageio_export(imgid, filename, format, fdata, high_quality, upscale,
-                    is_scaling, scale_factor,
-                    TRUE, export_masks, icc_type, icc_filename,
-                    icc_intent, self, sdata, num, total, metadata);
+  if(dt_imageio_export(imgid, filename, format, fdata, high_quality, upscale,
+                       is_scaling, scale_factor,
+                       TRUE, export_masks, icc_type, icc_filename,
+                       icc_intent, self, sdata, num, total, metadata) != 0)
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[imageio_storage_latex] could not export to latex book: '%s'!",
+             filename);
+    dt_control_log(_("could not export to latex book '%s'!"), filename);
+    return 1;
+  }
 
-  dt_print(DT_DEBUG_ALWAYS, "[export_job] exported to `%s'", filename);
+  dt_print(DT_DEBUG_IMAGEIO, "[export_job] exported to '%s'", filename);
   dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'",
                           num),
                  num, total, filename);
@@ -432,6 +441,7 @@ void init(dt_imageio_module_storage_t *self)
   dt_lua_register_module_member(darktable.lua_state.state, self, dt_imageio_latex_t, title, char_1024);
 #endif
 }
+
 void *get_params(dt_imageio_module_storage_t *self)
 {
   dt_imageio_latex_t *d = calloc(1, sizeof(dt_imageio_latex_t));

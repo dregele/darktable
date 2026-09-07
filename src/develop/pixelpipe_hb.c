@@ -556,9 +556,13 @@ void dt_dev_pixelpipe_create_nodes(dt_dev_pixelpipe_t *pipe,
 }
 
 // helper
+/* `replaying` is TRUE only for the dt_dev_pixelpipe_synch_all() replay loop,
+   which defers the usedetails flush to a single invalidation once the whole
+   history has been committed */
 static void _dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe,
                                  dt_develop_t *dev,
-                                 GList *history)
+                                 GList *history,
+                                 const gboolean replaying)
 {
   dt_dev_history_item_t *hist = history->data;
   // find piece in nodes list
@@ -668,8 +672,16 @@ static void _dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe,
 
         if(!feqf(bp->details, 0.0f, 1e-6) && valid_mask && pipe->want_detail_mask == FALSE)
         {
-          dt_iop_module_t *gen = raw_img ? dt_iop_get_module("demosaic") : NULL;
-          dt_dev_pixelpipe_cache_invalidate_later(pipe, gen ? gen->iop_order : 0, "usedetails ");
+          // during synch_all replay the flush is deferred to a single
+          // presence-gated invalidation at the end (see
+          // dt_dev_pixelpipe_synch_all): the scharr buffer is preserved across
+          // replay, so flushing per module here is both unnecessary and ruinous
+          // for the pipe cache
+          if(!replaying)
+          {
+            dt_iop_module_t *gen = raw_img ? dt_iop_get_module("demosaic") : NULL;
+            dt_dev_pixelpipe_cache_invalidate_later(pipe, gen ? gen->iop_order : 0, "usedetails ");
+          }
           pipe->want_detail_mask = TRUE;
         }
       }
@@ -778,13 +790,27 @@ void dt_dev_pixelpipe_synch_all(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
   dt_print_pipe(DT_DEBUG_PARAMS, "synch all module history",
     pipe, NULL, DT_DEVICE_NONE, NULL, NULL);
 
-  dt_dev_clear_scharr_mask(pipe);
+  /* keep the scharr detail mask across history replay. Its producer (demosaic
+     or rawprepare) rewrites it precisely when it reprocesses, i.e. exactly when
+     its output, and hence the scharr, would change, and leaves it valid on a
+     cache hit. rawprepare writes it WB-independently (rawmode=FALSE, see
+     rawprepare.c) and demosaic sits downstream of temperature, so no input the
+     scharr depends on can change without its producer reprocessing.
+
+     We suppress that per-module flush during replay and settle the buffer once,
+     after the whole history has been committed (see below).
+
+     The per-piece mask caches are dropped every synch_all as before; only the
+     scharr buffer is carried across, and only while it is still wanted */
+  for(GList *nodes = pipe->nodes; nodes; nodes = g_list_next(nodes))
+    _clear_piece_mask_caches(nodes->data);
+
   pipe->want_detail_mask = FALSE;
 
   GList *history = dev->history;
   for(int k = 0; k < dev->history_end && history; k++)
   {
-    _dev_pixelpipe_synch(pipe, dev, history);
+    _dev_pixelpipe_synch(pipe, dev, history, TRUE);
     history = g_list_next(history);
   }
 
@@ -792,6 +818,27 @@ void dt_dev_pixelpipe_synch_all(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
   // drop any phantom users left behind by deleted or de-synced consumers
   for(GList *nodes = pipe->nodes; nodes; nodes = g_list_next(nodes))
     _iop_prune_stale_raster_users(pipe, ((dt_dev_pixelpipe_iop_t *)nodes->data)->module);
+
+  /* decide from the actual state, not from a cross-synch_all compare of
+     want_detail_mask: that flag is unreliable here, as node rebuilds reset it and
+     it can flicker mid-drag. The buffer is the ground truth, and it belongs to its
+     producer: demosaic and rawprepare clear it at the top of every process() and
+     rewrite it iff want_detail_mask, so a buffer that is still around was left
+     valid by the last producer run. All synch_all has to do is force that run when
+     the buffer is needed but missing, i.e. on the first process or after a node
+     rebuild dropped it.
+
+     When it is no longer wanted we free it right away rather than waiting for the
+     producer's next run, which may never come while it stays cached: scharr.size
+     counts towards _get_pipe_cache_mem(), so holding an unused buffer would shrink
+     the budget left for cachelines. No flush is needed for that direction, as
+     nothing cached still refers to the buffer. A mere detail-threshold change
+     needs no flush either, since it changes the mask hash and the masked module
+     invalidates on its own */
+  if(pipe->want_detail_mask && pipe->scharr.data == NULL)
+    dt_dev_pixelpipe_cache_invalidate_later(pipe, 0, "usedetails build ");
+  else if(!pipe->want_detail_mask && pipe->scharr.data != NULL)
+    dt_dev_clear_scharr_mask(pipe);
 
   dt_print_pipe(DT_DEBUG_PARAMS,
            "synch all modules done",
@@ -810,7 +857,7 @@ void dt_dev_pixelpipe_synch_top(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
     dt_dev_history_item_t *hist = history->data;
     dt_print_pipe(DT_DEBUG_PARAMS, "synch top history module",
       pipe, hist->module, DT_DEVICE_NONE, NULL, NULL);
-    _dev_pixelpipe_synch(pipe, dev, history);
+    _dev_pixelpipe_synch(pipe, dev, history, FALSE);
   }
   else
   {

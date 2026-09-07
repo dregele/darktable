@@ -119,6 +119,11 @@ changes (where available).
 - Don't invalidate the pixelpipe cache on every commit
   when a raster mask is used.
 
+- Sped up editing an image that uses a detail mask. Every history change
+  used to discard the cached output of every module from demosaic onwards,
+  so adjusting a mask or toggling the mask overlay recomputed most of the
+  pipeline each time.
+
 ## Other Changes
 
 - Added a new collection filter for the original image dimensions.
@@ -156,6 +161,11 @@ changes (where available).
 
 - pixelpipe dump files requested via cli switches are now written
   in ppm or pgm format.
+
+- The aspect ratio chosen on the camera is now applied as a crop when
+  the raw was left uncropped, so a frame shot at 1:1 or 16:9 opens
+  framed as intended while the full sensor area stays available to
+  reframe within. Read from Canon and Olympus raws.
 
 ## Bug Fixes
 

@@ -36,9 +36,11 @@
 #include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
 #include <glib-2.0/gio/gio.h>
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
+
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -542,7 +544,7 @@ try_again:
     return 1;
   }
 
-  dt_print(DT_DEBUG_ALWAYS, "[export_job] exported to `%s'", filename);
+  dt_print(DT_DEBUG_IMAGEIO, "[export_job] exported to '%s'", filename);
   dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'", num),
                  num, total, filename);
   return 0;

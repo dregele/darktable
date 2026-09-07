@@ -1,6 +1,6 @@
 /*
     This file is part of darktable,
-    Copyright (C) 2011-2025 darktable developers.
+    Copyright (C) 2011-2026 darktable developers.
 
     darktable is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -34,9 +34,11 @@
 #include "imageio/imageio_common.h"
 #include "imageio/imageio_module.h"
 #include "imageio/storage/imageio_storage_api.h"
+
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
+
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -455,7 +457,7 @@ int store(dt_imageio_module_storage_t *self,
   fdata->max_width = save_max_width;
   fdata->max_height = save_max_height;
 
-  dt_print(DT_DEBUG_ALWAYS, "[export_job] exported to `%s'", filename);
+  dt_print(DT_DEBUG_IMAGEIO, "[export_job] exported to `%s'", filename);
   dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'", num),
                  num, total, filename);
   return 0;
