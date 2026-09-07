@@ -310,7 +310,11 @@ static int32_t dt_camera_focus_bracket_job_run(dt_job_t *job)
 
     // capture, reusing the regular tethered capture/download path so
     // that already captured frames stay imported even if the sequence
-    // is cancelled or fails part-way through
+    // is cancelled or fails part-way through. dt_camctl_camera_capture()
+    // only enqueues the capture on the camera's tether thread; a hard
+    // camera-side failure is surfaced asynchronously to the user through
+    // the usual camera_error listener callback/dt_control_log, the same
+    // as for the regular (non-bracket) capture job above
     dt_camctl_camera_capture(darktable.camctl, NULL);
 
     fraction += 1.0 / total;

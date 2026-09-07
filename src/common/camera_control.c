@@ -29,6 +29,31 @@
 #include <errno.h>
 #include <locale.h>
 
+/** Number of attempts and backoff delay used when retrying a gphoto2
+    call that failed with GP_ERROR_CAMERA_BUSY (transient "device busy"
+    responses are common on Sony bodies right after a capture or a
+    manual focus step). */
+#define DT_CAMCTL_BUSY_RETRY_MAX_TRIES 5
+#define DT_CAMCTL_BUSY_RETRY_BACKOFF_US 150000 // 150ms
+
+/** Runs \p op up to DT_CAMCTL_BUSY_RETRY_MAX_TRIES times, retrying with a
+    short sleep as long as it keeps returning GP_ERROR_CAMERA_BUSY, and
+    stores the last result in \p res_var. \p what is used in the retry
+    log message. */
+#define DT_CAMCTL_RETRY_ON_BUSY(res_var, what, op)                                   \
+  do                                                                                 \
+  {                                                                                  \
+    for(int _tries = 0; _tries < DT_CAMCTL_BUSY_RETRY_MAX_TRIES; _tries++)           \
+    {                                                                                \
+      (res_var) = (op);                                                             \
+      if((res_var) != GP_ERROR_CAMERA_BUSY) break;                                  \
+      dt_print(DT_DEBUG_CAMCTL,                                                     \
+               "[camera_control] camera busy while %s, retrying (%d/%d)",           \
+               (what), _tries + 1, DT_CAMCTL_BUSY_RETRY_MAX_TRIES);                 \
+      g_usleep(DT_CAMCTL_BUSY_RETRY_BACKOFF_US);                                    \
+    }                                                                               \
+  } while(0)
+
 /** Retry a gp_camera_set_single_config() call a few times if the camera
     reports it is transiently busy (this is common on Sony bodies right
     after a capture or a manual focus step). \note c->config_lock must
@@ -38,17 +63,9 @@ static int _camera_set_single_config_retry(const dt_camctl_t *c,
                                            const char *name,
                                            CameraWidget *widget)
 {
-  const int max_tries = 5;
   int res = GP_ERROR_CAMERA_BUSY;
-  for(int tries = 0; tries < max_tries; tries++)
-  {
-    res = gp_camera_set_single_config(cam->gpcam, name, widget, c->gpcontext);
-    if(res != GP_ERROR_CAMERA_BUSY) break;
-    dt_print(DT_DEBUG_CAMCTL,
-             "[camera_control] camera busy while setting %s, retrying (%d/%d)",
-             name, tries + 1, max_tries);
-    g_usleep(150000); // 150ms backoff
-  }
+  DT_CAMCTL_RETRY_ON_BUSY(res, name,
+                         gp_camera_set_single_config(cam->gpcam, name, widget, c->gpcontext));
   return res;
 }
 
@@ -320,17 +337,9 @@ static int _camera_capture_retry(const dt_camctl_t *c,
                                  const dt_camera_t *cam,
                                  CameraFilePath *fp)
 {
-  const int max_tries = 5;
   int res = GP_ERROR_CAMERA_BUSY;
-  for(int tries = 0; tries < max_tries; tries++)
-  {
-    res = gp_camera_capture(cam->gpcam, GP_CAPTURE_IMAGE, fp, c->gpcontext);
-    if(res != GP_ERROR_CAMERA_BUSY) break;
-    dt_print(DT_DEBUG_CAMCTL,
-             "[camera_control] camera busy while capturing, retrying (%d/%d)",
-             tries + 1, max_tries);
-    g_usleep(150000); // 150ms backoff
-  }
+  DT_CAMCTL_RETRY_ON_BUSY(res, "capturing",
+                         gp_camera_capture(cam->gpcam, GP_CAPTURE_IMAGE, fp, c->gpcontext));
   return res;
 }
 

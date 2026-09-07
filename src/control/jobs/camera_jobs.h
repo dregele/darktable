@@ -35,9 +35,12 @@ dt_job_t *dt_camera_import_job_create(GList *images, struct dt_camera_t *camera,
 /** Focus bracketing job.
  * Drives the camera's manual focus stepping action (Sony:
  * /main/actions/manualfocus) between captures, to build a focus stack.
- * \param frames total number of frames to capture, including the first one
+ * \param frames total number of frames to capture, including the first
+ *   one; clamped up to a minimum of 2
  * \param step focus step magnitude, clamped to 1..7
- * \param near TRUE to move focus nearer between frames, FALSE to move farther
+ * \param near TRUE moves focus nearer between frames, FALSE moves it
+ *   farther (mirrors the sign of the manualfocus action: near is negative,
+ *   far is positive)
  * \param settle_ms delay in milliseconds between the focus move and the next capture
  * \param prefocus TRUE to run an autofocus half-press before the first capture
  * \param af_hold_ms hold time in milliseconds for the optional prefocus half-press
