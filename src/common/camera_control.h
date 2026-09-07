@@ -31,6 +31,16 @@
 #include <gphoto2/gphoto2.h>
 #include <gtk/gtk.h>
 
+/** Valid step magnitude range for the "manualfocus" gphoto2 action
+ * (Sony PTP_DPC_SONY_ManualFocusAdjust, exposed as
+ * /main/actions/manualfocus by libgphoto2): step values are signed,
+ * nonzero, with the sign giving direction (negative: nearer, positive:
+ * farther) and the absolute value giving the step size, 1 (fine) to 7
+ * (coarse). Zero is not a valid step and triggers a different action
+ * (AFMFHold) on the camera, so callers must never send it. */
+#define DT_CAMCTL_MANUALFOCUS_STEP_MIN 1
+#define DT_CAMCTL_MANUALFOCUS_STEP_MAX 7
+
 /** A camera object used for camera actions and callbacks */
 typedef struct dt_camera_t
 {
@@ -328,6 +338,16 @@ void dt_camctl_camera_set_property_float(const dt_camctl_t *c,
                                          const dt_camera_t *cam,
                                          const char *property_name,
                                          const float value);
+/** Trigger autofocus using shutter half-press emulation, the only AF
+ * trigger strategy supported by Sony bodies over PTP (there is no
+ * separate "run autofocus" action, only the "autofocus" toggle mapped to
+ * PTP_DPC_SONY_ShutterHalfRelease). Begins the half-press immediately and
+ * schedules the release after \p hold_ms milliseconds on the glib main
+ * loop. \param cam Pointer to dt_camera_t if NULL the camctl->active_camera is used.
+ * \return FALSE (and does nothing) if the camera doesn't expose the "autofocus" property. */
+gboolean dt_camctl_camera_trigger_af_halfpress(const dt_camctl_t *c,
+                                               const dt_camera_t *cam,
+                                               const int hold_ms);
 /** Get a property value from cached configuration. \param cam Pointer to dt_camera_t if NULL the
  * camctl->active_camera is used. */
 const char *dt_camctl_camera_get_property(const dt_camctl_t *c,

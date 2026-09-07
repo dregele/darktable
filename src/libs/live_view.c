@@ -188,6 +188,16 @@ static void _zoom_live_view_clicked(GtkWidget *widget, gpointer user_data)
   }
 }
 
+// hold time for the Sony shutter half-press AF fallback below; see
+// dt_camctl_camera_trigger_af_halfpress()
+#define DT_LIVE_VIEW_AF_HALFPRESS_HOLD_MS 300
+// step magnitudes for the Sony manual focus fallback below (1 fine ..
+// 7 coarse); NEAR/FAR use a small nudge and NEARER/FARTHER a larger
+// one, mirroring the "nudge" vs "big move" distinction the Canon/Nikon
+// focus_amount values (50 vs 250) make further down in the same function
+#define DT_LIVE_VIEW_FOCUS_STEP_SMALL 1
+#define DT_LIVE_VIEW_FOCUS_STEP_LARGE 3
+
 static void _auto_focus_button_clicked(GtkWidget *widget, gpointer user_data)
 {
   const char *property = "autofocusdrive";
@@ -195,8 +205,15 @@ static void _auto_focus_button_clicked(GtkWidget *widget, gpointer user_data)
   if(dt_camctl_camera_get_property_type(darktable.camctl, NULL,
                                         property, &property_type))
   {
-    dt_print(DT_DEBUG_CAMCTL,
-             "[camera control] unable to get property type for %s", property);
+    // Sony bodies don't expose a dedicated "run autofocus" property;
+    // they only support triggering AF through shutter half-press
+    // emulation, so that's the only fallback path we try
+    if(!dt_camctl_camera_trigger_af_halfpress(darktable.camctl, NULL,
+                                              DT_LIVE_VIEW_AF_HALFPRESS_HOLD_MS))
+    {
+      dt_print(DT_DEBUG_CAMCTL,
+               "[camera control] unable to get property type for %s", property);
+    }
   }
   else
   {
@@ -221,10 +238,30 @@ static void _focus_button_clicked(GtkWidget *widget, gpointer user_data)
   if(dt_camctl_camera_get_property_type(darktable.camctl, NULL,
                                         "manualfocusdrive", &property_type))
   {
-    // default to avoid breaking backwards compatibility
-    // note that this might not work on non-Canon EOS cameras
-    dt_camctl_camera_set_property_choice(darktable.camctl, NULL,
-                                         "manualfocusdrive", focus);
+    // Sony: no "manualfocusdrive" property, use the manual focus step
+    // action instead. Valid values are nonzero -7..-1 (near) / 1..7
+    // (far), sign is direction, magnitude is step size
+    if(dt_camctl_camera_property_exists(darktable.camctl, NULL, "manualfocus"))
+    {
+      int step;
+      switch(focus)
+      {
+        case DT_FOCUS_NEARER:  step = -DT_LIVE_VIEW_FOCUS_STEP_LARGE; break;
+        case DT_FOCUS_NEAR:    step = -DT_LIVE_VIEW_FOCUS_STEP_SMALL; break;
+        case DT_FOCUS_FAR:     step =  DT_LIVE_VIEW_FOCUS_STEP_SMALL; break;
+        case DT_FOCUS_FARTHER: step =  DT_LIVE_VIEW_FOCUS_STEP_LARGE; break;
+        default: step = 0;
+      }
+      if(step != 0)
+        dt_camctl_camera_set_property_float(darktable.camctl, NULL, "manualfocus", step);
+    }
+    else
+    {
+      // default to avoid breaking backwards compatibility
+      // note that this might not work on non-Canon EOS cameras
+      dt_camctl_camera_set_property_choice(darktable.camctl, NULL,
+                                           "manualfocusdrive", focus);
+    }
   }
   else
   {
