@@ -31,6 +31,16 @@
 #include <gphoto2/gphoto2.h>
 #include <gtk/gtk.h>
 
+/** Valid step magnitude range for the "manualfocus" gphoto2 action
+ * (Sony PTP_DPC_SONY_ManualFocusAdjust, exposed as
+ * /main/actions/manualfocus by libgphoto2): step values are signed,
+ * nonzero, with the sign giving direction (negative: nearer, positive:
+ * farther) and the absolute value giving the step size, 1 (fine) to 7
+ * (coarse). Zero is not a valid step and triggers a different action
+ * (AFMFHold) on the camera, so callers must never send it. */
+#define DT_CAMCTL_MANUALFOCUS_STEP_MIN 1
+#define DT_CAMCTL_MANUALFOCUS_STEP_MAX 7
+
 /** A camera object used for camera actions and callbacks */
 typedef struct dt_camera_t
 {

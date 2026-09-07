@@ -37,7 +37,7 @@ dt_job_t *dt_camera_import_job_create(GList *images, struct dt_camera_t *camera,
  * /main/actions/manualfocus) between captures, to build a focus stack.
  * \param frames total number of frames to capture, including the first
  *   one; clamped up to a minimum of 2
- * \param step focus step magnitude, clamped to 1..7
+ * \param step focus step magnitude, clamped to DT_CAMCTL_MANUALFOCUS_STEP_MIN..MAX
  * \param near TRUE moves focus nearer between frames, FALSE moves it
  *   farther (mirrors the sign of the manualfocus action: near is negative,
  *   far is positive)

@@ -222,7 +222,8 @@ static void _focus_nudge_clicked(GtkWidget *widget, gpointer user_data)
     dt_control_log(_("camera doesn't support focus stepping"));
     return;
   }
-  const int step = CLAMP((int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.focus_step)), 1, 7);
+  const int step = CLAMP((int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.focus_step)),
+                          DT_CAMCTL_MANUALFOCUS_STEP_MIN, DT_CAMCTL_MANUALFOCUS_STEP_MAX);
   const int sign = (widget == lib->gui.focus_near_button) ? -1 : 1;
   dt_camctl_camera_set_property_float(darktable.camctl, NULL, "manualfocus", sign * step);
 }
@@ -239,13 +240,9 @@ static void _focus_bracket_button_clicked(GtkWidget *widget, gpointer user_data)
 {
   dt_lib_camera_t *lib = (dt_lib_camera_t *)user_data;
 
-  if(!dt_camctl_camera_property_exists(darktable.camctl, NULL, "manualfocus"))
-  {
-    dt_control_log(_("camera doesn't support focus stepping, "
-                     "can't run focus bracketing"));
-    return;
-  }
-
+  // capability is checked (and reported via dt_control_log) inside
+  // dt_camera_focus_bracket_job_run() itself, so there is no need to
+  // duplicate that check here
   const uint32_t frames = (uint32_t)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.fb_frames));
   const uint32_t step = (uint32_t)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.fb_step));
   const uint32_t settle_ms = (uint32_t)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.fb_settle));
@@ -582,7 +579,8 @@ void gui_init(dt_lib_module_t *self)
   lib->gui.focus_far_button = dtgtk_button_new(dtgtk_cairo_paint_arrow, CPF_DIRECTION_RIGHT, NULL);
   gtk_widget_set_tooltip_text(lib->gui.focus_near_button, _("nudge focus nearer"));
   gtk_widget_set_tooltip_text(lib->gui.focus_far_button, _("nudge focus farther"));
-  lib->gui.focus_step = gtk_spin_button_new_with_range(1, 7, 1);
+  lib->gui.focus_step = gtk_spin_button_new_with_range(DT_CAMCTL_MANUALFOCUS_STEP_MIN,
+                                                       DT_CAMCTL_MANUALFOCUS_STEP_MAX, 1);
   gtk_widget_set_tooltip_text(lib->gui.focus_step, _("focus step size, 1 (fine) .. 7 (coarse)"));
 
   hbox = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(3)));
@@ -623,7 +621,8 @@ void gui_init(dt_lib_module_t *self)
   dt_bauhaus_combobox_add(lib->gui.fb_direction, _("near"));
   dt_bauhaus_combobox_add(lib->gui.fb_direction, _("far"));
   dt_bauhaus_combobox_set(lib->gui.fb_direction, 1);
-  lib->gui.fb_step = gtk_spin_button_new_with_range(1, 7, 1);
+  lib->gui.fb_step = gtk_spin_button_new_with_range(DT_CAMCTL_MANUALFOCUS_STEP_MIN,
+                                                     DT_CAMCTL_MANUALFOCUS_STEP_MAX, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(lib->gui.fb_step), 3);
   lib->gui.fb_settle = gtk_spin_button_new_with_range(0, 5000, 50);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(lib->gui.fb_settle), 300);

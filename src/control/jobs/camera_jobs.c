@@ -73,7 +73,7 @@ typedef struct dt_camera_focus_bracket_t
 {
   /** total number of frames to capture, including the first one */
   uint32_t frames;
-  /** focus step magnitude, 1..7, matches the range of Sony's
+  /** focus step magnitude, DT_CAMCTL_MANUALFOCUS_STEP_MIN..MAX, matches the range of Sony's
    * /main/actions/manualfocus action */
   uint32_t step;
   /** move focus nearer (TRUE) between frames, or farther (FALSE) */
@@ -314,7 +314,8 @@ static int32_t dt_camera_focus_bracket_job_run(dt_job_t *job)
       return 0;
   }
 
-  const int step = CLAMP((int)params->step, 1, 7);
+  const int step = CLAMP((int)params->step,
+                         DT_CAMCTL_MANUALFOCUS_STEP_MIN, DT_CAMCTL_MANUALFOCUS_STEP_MAX);
   const int signed_step = params->near ? -step : step;
 
   double fraction = 0;
@@ -372,7 +373,7 @@ dt_job_t *dt_camera_focus_bracket_job_create(const uint32_t frames,
   dt_control_job_set_params(job, params, free);
 
   params->frames = MAX(2u, frames);
-  params->step = CLAMP(step, 1u, 7u);
+  params->step = CLAMP(step, (uint32_t)DT_CAMCTL_MANUALFOCUS_STEP_MIN, (uint32_t)DT_CAMCTL_MANUALFOCUS_STEP_MAX);
   params->near = near;
   params->settle_ms = settle_ms;
   params->prefocus = prefocus;
