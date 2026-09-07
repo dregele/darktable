@@ -257,6 +257,29 @@ dt_job_t *dt_camera_capture_job_create(const char *jobcode,
   return job;
 }
 
+/** Sleep for \p ms milliseconds in small slices, checking \p job's
+ * cancellation state between slices so a cancel request (e.g. from the
+ * darktable progress bar) takes effect promptly instead of only being
+ * noticed after a multi-second sleep. \return TRUE if the job was
+ * cancelled before the full delay elapsed. */
+#define DT_CAMERA_FOCUS_BRACKET_SLEEP_SLICE_MS 50
+static gboolean _sleep_cancellable(dt_job_t *job, uint32_t ms)
+{
+  while(ms > 0)
+  {
+    if(dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED)
+      return TRUE;
+    const uint32_t slice = MIN(ms, DT_CAMERA_FOCUS_BRACKET_SLEEP_SLICE_MS);
+    g_usleep(slice * 1000);
+    ms -= slice;
+  }
+  return dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED;
+}
+
+// settle time after releasing an autofocus half-press, before the lens
+// is considered focused and it's safe to move on
+#define DT_CAMERA_AF_HALFPRESS_SETTLE_MS 300
+
 /** Focus bracketing: repeatedly nudge the lens focus with the camera's
  * manual focus stepping action and capture a frame after each move.
  * \see dev-doc / PTP_DPC_SONY_ManualFocusAdjust, exposed by libgphoto2
@@ -284,9 +307,11 @@ static int32_t dt_camera_focus_bracket_job_run(dt_job_t *job)
     // shutter half-press begin/end: this is the only autofocus trigger
     // strategy that works reliably across Sony bodies
     dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 1);
-    g_usleep(params->af_hold_ms * 1000);
+    if(_sleep_cancellable(job, params->af_hold_ms))
+      return 0;
     dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 0);
-    g_usleep(300000); // let the camera settle after releasing the half-press
+    if(_sleep_cancellable(job, DT_CAMERA_AF_HALFPRESS_SETTLE_MS))
+      return 0;
   }
 
   const int step = CLAMP((int)params->step, 1, 7);
@@ -302,7 +327,8 @@ static int32_t dt_camera_focus_bracket_job_run(dt_job_t *job)
     {
       dt_camctl_camera_set_property_float(darktable.camctl, NULL,
                                           "manualfocus", signed_step);
-      g_usleep(params->settle_ms * 1000);
+      if(_sleep_cancellable(job, params->settle_ms))
+        break;
     }
 
     if(dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED)

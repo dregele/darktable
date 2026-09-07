@@ -201,36 +201,17 @@ static void _camera_property_accessibility_changed(const dt_camera_t *camera,
 {
 }
 
-// how long to hold the shutter half-press for an autofocus trigger, and
-// the settle time after releasing it before the lens is considered
-// focused. Sony bodies only expose autofocus this way (no dedicated
-// "run autofocus" action), so this is the one and only AF trigger path.
+// how long to hold the shutter half-press for an autofocus trigger.
+// Sony bodies only expose autofocus this way (no dedicated "run
+// autofocus" action), so this is the one and only AF trigger path; see
+// dt_camctl_camera_trigger_af_halfpress().
 #define DT_CAMERA_AF_HALFPRESS_HOLD_MS 300
 
-static gboolean _af_halfpress_end(gpointer user_data)
-{
-  dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 0);
-  return G_SOURCE_REMOVE;
-}
-
-// Trigger autofocus. Sony cameras only support this through shutter
-// half-press emulation (PTP_DPC_SONY_ShutterHalfRelease, exposed by
-// libgphoto2 as the "autofocus" toggle action) -- there is no separate
-// "run autofocus" command, so half-press begin/end is the only supported
-// sequence and we don't try any other trigger strategy.
 static void _af_button_clicked(GtkWidget *widget, gpointer user_data)
 {
-  if(!dt_camctl_camera_property_exists(darktable.camctl, NULL, "autofocus"))
-  {
+  if(!dt_camctl_camera_trigger_af_halfpress(darktable.camctl, NULL, DT_CAMERA_AF_HALFPRESS_HOLD_MS))
     dt_control_log(_("camera doesn't support autofocus half-press, "
                      "can't trigger autofocus"));
-    return;
-  }
-
-  // begin half-press, then release after a short hold so the camera has
-  // time to actually focus
-  dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 1);
-  g_timeout_add(DT_CAMERA_AF_HALFPRESS_HOLD_MS, _af_halfpress_end, NULL);
 }
 
 static void _focus_nudge_clicked(GtkWidget *widget, gpointer user_data)

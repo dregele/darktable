@@ -1936,6 +1936,37 @@ void dt_camctl_camera_set_property_float(const dt_camctl_t *c,
   _camera_add_job(camctl, camera, job);
 }
 
+typedef struct _af_halfpress_ctx_t
+{
+  const dt_camctl_t *c;
+  const dt_camera_t *cam;
+} _af_halfpress_ctx_t;
+
+static gboolean _af_halfpress_end(gpointer user_data)
+{
+  _af_halfpress_ctx_t *ctx = (_af_halfpress_ctx_t *)user_data;
+  dt_camctl_camera_set_property_int(ctx->c, ctx->cam, "autofocus", 0);
+  g_free(ctx);
+  return G_SOURCE_REMOVE;
+}
+
+gboolean dt_camctl_camera_trigger_af_halfpress(const dt_camctl_t *c,
+                                               const dt_camera_t *cam,
+                                               const int hold_ms)
+{
+  if(!dt_camctl_camera_property_exists(c, cam, "autofocus"))
+    return FALSE;
+
+  dt_camctl_camera_set_property_int(c, cam, "autofocus", 1);
+
+  _af_halfpress_ctx_t *ctx = g_malloc(sizeof(_af_halfpress_ctx_t));
+  ctx->c = c;
+  ctx->cam = cam;
+  g_timeout_add(hold_ms, _af_halfpress_end, ctx);
+  return TRUE;
+}
+
+
 const char *dt_camctl_camera_get_property(const dt_camctl_t *c,
                                           const dt_camera_t *cam,
                                           const char *property_name)
