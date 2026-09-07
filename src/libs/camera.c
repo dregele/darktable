@@ -53,6 +53,16 @@ typedef struct dt_lib_camera_t
     GtkWidget *timer, *count, *brackets, *steps;
     GtkWidget *button1;
 
+    // focus controls: AF trigger (shutter half-press emulation only),
+    // manual near/far nudge and, if supported, focus aid zoom
+    GtkWidget *af_button;
+    GtkWidget *focus_near_button, *focus_far_button, *focus_step;
+    GtkDarktableToggleButton *focus_aid_zoom_button;
+
+    // focus bracketing (highest priority Sony workflow: repeatedly step
+    // focus and capture, using /main/actions/manualfocus)
+    GtkWidget *fb_frames, *fb_direction, *fb_step, *fb_settle, *fb_prefocus, *fb_button;
+
     int rows;       // the number of rows in the grid
     int prop_start; // the row of the grid above the first property
     int prop_end;   // the row of the grid where to insert new properties
@@ -189,6 +199,81 @@ static void _camera_property_accessibility_changed(const dt_camera_t *camera,
                                                    gboolean read_only,
                                                    void *data)
 {
+}
+
+// how long to hold the shutter half-press for an autofocus trigger, and
+// the settle time after releasing it before the lens is considered
+// focused. Sony bodies only expose autofocus this way (no dedicated
+// "run autofocus" action), so this is the one and only AF trigger path.
+#define DT_CAMERA_AF_HALFPRESS_HOLD_MS 300
+
+static gboolean _af_halfpress_end(gpointer user_data)
+{
+  dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 0);
+  return G_SOURCE_REMOVE;
+}
+
+// Trigger autofocus. Sony cameras only support this through shutter
+// half-press emulation (PTP_DPC_SONY_ShutterHalfRelease, exposed by
+// libgphoto2 as the "autofocus" toggle action) -- there is no separate
+// "run autofocus" command, so half-press begin/end is the only supported
+// sequence and we don't try any other trigger strategy.
+static void _af_button_clicked(GtkWidget *widget, gpointer user_data)
+{
+  if(!dt_camctl_camera_property_exists(darktable.camctl, NULL, "autofocus"))
+  {
+    dt_control_log(_("camera doesn't support autofocus half-press, "
+                     "can't trigger autofocus"));
+    return;
+  }
+
+  // begin half-press, then release after a short hold so the camera has
+  // time to actually focus
+  dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 1);
+  g_timeout_add(DT_CAMERA_AF_HALFPRESS_HOLD_MS, _af_halfpress_end, NULL);
+}
+
+static void _focus_nudge_clicked(GtkWidget *widget, gpointer user_data)
+{
+  dt_lib_camera_t *lib = (dt_lib_camera_t *)user_data;
+  if(!dt_camctl_camera_property_exists(darktable.camctl, NULL, "manualfocus"))
+  {
+    dt_control_log(_("camera doesn't support focus stepping"));
+    return;
+  }
+  const int step = CLAMP((int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.focus_step)), 1, 7);
+  const int sign = (widget == lib->gui.focus_near_button) ? -1 : 1;
+  dt_camctl_camera_set_property_float(darktable.camctl, NULL, "manualfocus", sign * step);
+}
+
+static void _focus_aid_zoom_clicked(GtkWidget *widget, gpointer user_data)
+{
+  const gboolean on = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
+  dt_camctl_camera_set_property_int(darktable.camctl, NULL, "focusmagnifier", on ? 1 : 0);
+  if(!on && dt_camctl_camera_property_exists(darktable.camctl, NULL, "focusmagnifierexit"))
+    dt_camctl_camera_set_property_int(darktable.camctl, NULL, "focusmagnifierexit", 1);
+}
+
+static void _focus_bracket_button_clicked(GtkWidget *widget, gpointer user_data)
+{
+  dt_lib_camera_t *lib = (dt_lib_camera_t *)user_data;
+
+  if(!dt_camctl_camera_property_exists(darktable.camctl, NULL, "manualfocus"))
+  {
+    dt_control_log(_("camera doesn't support focus stepping, "
+                     "can't run focus bracketing"));
+    return;
+  }
+
+  const uint32_t frames = (uint32_t)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.fb_frames));
+  const uint32_t step = (uint32_t)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.fb_step));
+  const uint32_t settle_ms = (uint32_t)gtk_spin_button_get_value(GTK_SPIN_BUTTON(lib->gui.fb_settle));
+  const gboolean near = dt_bauhaus_combobox_get(lib->gui.fb_direction) == 0;
+  const gboolean prefocus = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(lib->gui.fb_prefocus));
+
+  dt_control_add_job(DT_JOB_QUEUE_USER_FG,
+                     dt_camera_focus_bracket_job_create(frames, step, near, settle_ms,
+                                                        prefocus, DT_CAMERA_AF_HALFPRESS_HOLD_MS));
 }
 
 static gboolean _bailout_of_tethering(gpointer user_data)
@@ -505,6 +590,95 @@ void gui_init(dt_lib_module_t *self)
 
 
 
+  // Focus: AF trigger (shutter half-press emulation), manual near/far
+  // nudge and, when the camera exposes it, focus aid zoom
+  label = dt_ui_section_label_new(C_("section", "focus"));
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(label), 0, lib->gui.rows++, 2, 1);
+
+  lib->gui.af_button = dt_action_button_new(self, N_("autofocus"), _af_button_clicked, lib,
+                                            _("trigger autofocus (shutter half-press)"), 0, 0);
+  lib->gui.focus_near_button = dtgtk_button_new(dtgtk_cairo_paint_arrow, CPF_DIRECTION_LEFT, NULL);
+  lib->gui.focus_far_button = dtgtk_button_new(dtgtk_cairo_paint_arrow, CPF_DIRECTION_RIGHT, NULL);
+  gtk_widget_set_tooltip_text(lib->gui.focus_near_button, _("nudge focus nearer"));
+  gtk_widget_set_tooltip_text(lib->gui.focus_far_button, _("nudge focus farther"));
+  lib->gui.focus_step = gtk_spin_button_new_with_range(1, 7, 1);
+  gtk_widget_set_tooltip_text(lib->gui.focus_step, _("focus step size, 1 (fine) .. 7 (coarse)"));
+
+  hbox = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(3)));
+  gtk_box_pack_start(hbox, GTK_WIDGET(lib->gui.af_button), TRUE, TRUE, 0);
+  gtk_box_pack_start(hbox, GTK_WIDGET(lib->gui.focus_near_button), FALSE, FALSE, 0);
+  gtk_box_pack_start(hbox, GTK_WIDGET(lib->gui.focus_step), FALSE, FALSE, 0);
+  gtk_box_pack_start(hbox, GTK_WIDGET(lib->gui.focus_far_button), FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(hbox), 0, lib->gui.rows++, 2, 1);
+
+  g_signal_connect(G_OBJECT(lib->gui.focus_near_button), "clicked", G_CALLBACK(_focus_nudge_clicked), lib);
+  g_signal_connect(G_OBJECT(lib->gui.focus_far_button), "clicked", G_CALLBACK(_focus_nudge_clicked), lib);
+
+  lib->gui.focus_aid_zoom_button
+    = DTGTK_TOGGLEBUTTON(dtgtk_togglebutton_new(dtgtk_cairo_paint_zoom, 0, NULL));
+  gtk_widget_set_tooltip_text(GTK_WIDGET(lib->gui.focus_aid_zoom_button), _("toggle focus aid zoom"));
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.focus_aid_zoom_button), 0, lib->gui.rows++, 2, 1);
+  g_signal_connect(G_OBJECT(lib->gui.focus_aid_zoom_button), "clicked",
+                   G_CALLBACK(_focus_aid_zoom_clicked), lib);
+
+  // Focus bracketing: the highest priority Sony workflow. Repeatedly
+  // steps the lens focus with the camera's manual focus action and
+  // captures a frame after each move.
+  label = dt_ui_section_label_new(C_("section", "focus bracketing"));
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(label), 0, lib->gui.rows++, 2, 1);
+
+  GtkWidget *fb_frames_label = gtk_label_new(_("frames"));
+  GtkWidget *fb_direction_label = gtk_label_new(_("direction"));
+  GtkWidget *fb_step_label = gtk_label_new(_("step size"));
+  GtkWidget *fb_settle_label = gtk_label_new(_("settle (ms)"));
+  gtk_widget_set_halign(fb_frames_label, GTK_ALIGN_START);
+  gtk_widget_set_halign(fb_direction_label, GTK_ALIGN_START);
+  gtk_widget_set_halign(fb_step_label, GTK_ALIGN_START);
+  gtk_widget_set_halign(fb_settle_label, GTK_ALIGN_START);
+
+  lib->gui.fb_frames = gtk_spin_button_new_with_range(2, 999, 1);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(lib->gui.fb_frames), 10);
+  lib->gui.fb_direction = dt_bauhaus_combobox_new(NULL);
+  dt_bauhaus_combobox_add(lib->gui.fb_direction, _("near"));
+  dt_bauhaus_combobox_add(lib->gui.fb_direction, _("far"));
+  dt_bauhaus_combobox_set(lib->gui.fb_direction, 1);
+  lib->gui.fb_step = gtk_spin_button_new_with_range(1, 7, 1);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(lib->gui.fb_step), 3);
+  lib->gui.fb_settle = gtk_spin_button_new_with_range(0, 5000, 50);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(lib->gui.fb_settle), 300);
+
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(fb_frames_label), 0, lib->gui.rows++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.fb_frames),
+                          GTK_WIDGET(fb_frames_label), GTK_POS_RIGHT, 1, 1);
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(fb_direction_label), 0, lib->gui.rows++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.fb_direction),
+                          GTK_WIDGET(fb_direction_label), GTK_POS_RIGHT, 1, 1);
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(fb_step_label), 0, lib->gui.rows++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.fb_step),
+                          GTK_WIDGET(fb_step_label), GTK_POS_RIGHT, 1, 1);
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(fb_settle_label), 0, lib->gui.rows++, 1, 1);
+  gtk_grid_attach_next_to(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.fb_settle),
+                          GTK_WIDGET(fb_settle_label), GTK_POS_RIGHT, 1, 1);
+
+  lib->gui.fb_prefocus = gtk_check_button_new_with_label(_("autofocus before first frame"));
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.fb_prefocus), 0, lib->gui.rows++, 2, 1);
+
+  lib->gui.fb_button = dt_action_button_new(self, N_("start focus bracket"),
+                                            _focus_bracket_button_clicked, lib,
+                                            _("capture a focus stack, stepping focus between frames; "
+                                              "cancel from the progress indicator"), 0, 0);
+  gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(lib->gui.fb_button), 0, lib->gui.rows++, 2, 1);
+
+  gtk_widget_set_tooltip_text(GTK_WIDGET(lib->gui.fb_frames), _("total number of frames to capture"));
+  gtk_widget_set_tooltip_text(GTK_WIDGET(lib->gui.fb_direction),
+                              _("move focus nearer or farther between frames"));
+  gtk_widget_set_tooltip_text(GTK_WIDGET(lib->gui.fb_step),
+                              _("focus step size for each move, 1 (fine) .. 7 (coarse)"));
+  gtk_widget_set_tooltip_text(GTK_WIDGET(lib->gui.fb_settle),
+                              _("delay after each focus move, to let the lens settle before capturing"));
+
+
+
   // Camera settings
   label = dt_ui_section_label_new(C_("section", "properties"));
   gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(label), 0, lib->gui.rows++, 2, 1);
@@ -589,6 +763,18 @@ void view_enter(struct dt_lib_module_t *self,
     _lib_property_add_to_gui(prop, lib);
 
   if((prop = _lib_property_add_new(lib, _("size"), "imagesize")) != NULL)
+    _lib_property_add_to_gui(prop, lib);
+
+  if((prop = _lib_property_add_new(lib, _("exposure compensation"), "exposurecompensation")) != NULL)
+    _lib_property_add_to_gui(prop, lib);
+
+  if((prop = _lib_property_add_new(lib, _("color temperature"), "colortemperature")) != NULL)
+    _lib_property_add_to_gui(prop, lib);
+
+  if((prop = _lib_property_add_new(lib, _("capture target"), "capturetarget")) != NULL)
+    _lib_property_add_to_gui(prop, lib);
+
+  if((prop = _lib_property_add_new(lib, _("focus area"), "focusarea")) != NULL)
     _lib_property_add_to_gui(prop, lib);
 
   // Add user widgets

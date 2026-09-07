@@ -29,6 +29,29 @@
 #include <errno.h>
 #include <locale.h>
 
+/** Retry a gp_camera_set_single_config() call a few times if the camera
+    reports it is transiently busy (this is common on Sony bodies right
+    after a capture or a manual focus step). \note c->config_lock must
+    already be held by the caller. */
+static int _camera_set_single_config_retry(const dt_camctl_t *c,
+                                           const dt_camera_t *cam,
+                                           const char *name,
+                                           CameraWidget *widget)
+{
+  const int max_tries = 5;
+  int res = GP_ERROR_CAMERA_BUSY;
+  for(int tries = 0; tries < max_tries; tries++)
+  {
+    res = gp_camera_set_single_config(cam->gpcam, name, widget, c->gpcontext);
+    if(res != GP_ERROR_CAMERA_BUSY) break;
+    dt_print(DT_DEBUG_CAMCTL,
+             "[camera_control] camera busy while setting %s, retrying (%d/%d)",
+             name, tries + 1, max_tries);
+    g_usleep(150000); // 150ms backoff
+  }
+  return res;
+}
+
 /***/
 typedef enum _camctl_camera_job_type_t
 {
@@ -290,6 +313,27 @@ static gpointer _camera_get_job(const dt_camctl_t *c,
 }
 
 
+/** Retry gp_camera_capture() a few times if the camera reports it is
+    transiently busy, which can happen right after a manual focus step on
+    Sony bodies during focus bracketing. */
+static int _camera_capture_retry(const dt_camctl_t *c,
+                                 const dt_camera_t *cam,
+                                 CameraFilePath *fp)
+{
+  const int max_tries = 5;
+  int res = GP_ERROR_CAMERA_BUSY;
+  for(int tries = 0; tries < max_tries; tries++)
+  {
+    res = gp_camera_capture(cam->gpcam, GP_CAPTURE_IMAGE, fp, c->gpcontext);
+    if(res != GP_ERROR_CAMERA_BUSY) break;
+    dt_print(DT_DEBUG_CAMCTL,
+             "[camera_control] camera busy while capturing, retrying (%d/%d)",
+             tries + 1, max_tries);
+    g_usleep(150000); // 150ms backoff
+  }
+  return res;
+}
+
 static void _camera_process_job(const dt_camctl_t *c,
                                 const dt_camera_t *camera,
                                 gpointer job)
@@ -305,7 +349,7 @@ static void _camera_process_job(const dt_camctl_t *c,
                "[camera_control] executing remote camera capture job");
       CameraFilePath fp;
       int res = GP_OK;
-      if((res = gp_camera_capture(camera->gpcam, GP_CAPTURE_IMAGE, &fp, c->gpcontext)) == GP_OK)
+      if((res = _camera_capture_retry(c, camera, &fp)) == GP_OK)
       {
         CameraFile *destination;
         const char *output_path = _dispatch_request_image_path(c, NULL, camera);
@@ -508,8 +552,8 @@ static void _camera_process_job(const dt_camctl_t *c,
                    spj->value, spj->name, set_value_succeeds);
         }
         const int set_config_succeeds =
-          gp_camera_set_single_config(cam->gpcam, spj->name, widget, c->gpcontext);
-        if(set_value_succeeds != GP_OK)
+          _camera_set_single_config_retry(c, cam, spj->name, widget);
+        if(set_config_succeeds != GP_OK)
         {
           dt_print(DT_DEBUG_CAMCTL,
                    "[camera_control] setting config failed with code %d",
@@ -541,8 +585,8 @@ static void _camera_process_job(const dt_camctl_t *c,
                    spj->value, spj->name, set_value_succeeds);
         }
         const int set_config_succeeds =
-          gp_camera_set_single_config(cam->gpcam, spj->name, widget, c->gpcontext);
-        if(set_value_succeeds != GP_OK)
+          _camera_set_single_config_retry(c, cam, spj->name, widget);
+        if(set_config_succeeds != GP_OK)
         {
           dt_print(DT_DEBUG_CAMCTL,
                    "[camera_control] setting config failed with code %d",

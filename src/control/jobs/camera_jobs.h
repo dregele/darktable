@@ -32,6 +32,23 @@ dt_job_t *dt_camera_capture_job_create(const char *jobcode, uint32_t delay, uint
 dt_job_t *dt_camera_import_job_create(GList *images, struct dt_camera_t *camera,
                                       const char *time_override);
 
+/** Focus bracketing job.
+ * Drives the camera's manual focus stepping action (Sony:
+ * /main/actions/manualfocus) between captures, to build a focus stack.
+ * \param frames total number of frames to capture, including the first one
+ * \param step focus step magnitude, clamped to 1..7
+ * \param near TRUE to move focus nearer between frames, FALSE to move farther
+ * \param settle_ms delay in milliseconds between the focus move and the next capture
+ * \param prefocus TRUE to run an autofocus half-press before the first capture
+ * \param af_hold_ms hold time in milliseconds for the optional prefocus half-press
+ */
+dt_job_t *dt_camera_focus_bracket_job_create(const uint32_t frames,
+                                             const uint32_t step,
+                                             const gboolean near,
+                                             const uint32_t settle_ms,
+                                             const gboolean prefocus,
+                                             const uint32_t af_hold_ms);
+
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

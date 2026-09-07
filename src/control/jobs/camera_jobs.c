@@ -69,6 +69,24 @@ typedef struct dt_camera_import_t
   uint32_t import_count;
 } dt_camera_import_t;
 
+typedef struct dt_camera_focus_bracket_t
+{
+  /** total number of frames to capture, including the first one */
+  uint32_t frames;
+  /** focus step magnitude, 1..7, matches the range of Sony's
+   * /main/actions/manualfocus action */
+  uint32_t step;
+  /** move focus nearer (TRUE) between frames, or farther (FALSE) */
+  gboolean near;
+  /** delay in ms between the focus move and the next capture, letting
+   * the lens settle before the shutter fires */
+  uint32_t settle_ms;
+  /** run an autofocus half-press before the first capture */
+  gboolean prefocus;
+  /** hold time in ms for the optional prefocus half-press */
+  uint32_t af_hold_ms;
+} dt_camera_focus_bracket_t;
+
 static int32_t dt_camera_capture_job_run(dt_job_t *job)
 {
   dt_camera_capture_t *params = dt_control_job_get_params(job);
@@ -236,6 +254,99 @@ dt_job_t *dt_camera_capture_job_create(const char *jobcode,
   params->count = count;
   params->brackets = brackets;
   params->steps = steps;
+  return job;
+}
+
+/** Focus bracketing: repeatedly nudge the lens focus with the camera's
+ * manual focus stepping action and capture a frame after each move.
+ * \see dev-doc / PTP_DPC_SONY_ManualFocusAdjust, exposed by libgphoto2
+ * as the "/main/actions/manualfocus" action (nonzero values -7..-1 and
+ * 1..7, sign is direction, magnitude is step size). */
+static int32_t dt_camera_focus_bracket_job_run(dt_job_t *job)
+{
+  dt_camera_focus_bracket_t *params = dt_control_job_get_params(job);
+
+  if(!dt_camctl_camera_property_exists(darktable.camctl, NULL, "manualfocus"))
+  {
+    dt_control_log(_("camera does not support focus stepping, "
+                     "can't run focus bracketing"));
+    return 1;
+  }
+
+  const int total = MAX(1, (int)params->frames);
+  dt_control_job_set_progress_message(job,
+           ngettext("focus bracketing: capturing %d frame",
+                    "focus bracketing: capturing %d frames", total), total);
+
+  if(params->prefocus
+     && dt_camctl_camera_property_exists(darktable.camctl, NULL, "autofocus"))
+  {
+    // shutter half-press begin/end: this is the only autofocus trigger
+    // strategy that works reliably across Sony bodies
+    dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 1);
+    g_usleep(params->af_hold_ms * 1000);
+    dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 0);
+    g_usleep(300000); // let the camera settle after releasing the half-press
+  }
+
+  const int step = CLAMP((int)params->step, 1, 7);
+  const int signed_step = params->near ? -step : step;
+
+  double fraction = 0;
+  for(uint32_t i = 0; i < params->frames; i++)
+  {
+    if(dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED)
+      break;
+
+    if(i > 0)
+    {
+      dt_camctl_camera_set_property_float(darktable.camctl, NULL,
+                                          "manualfocus", signed_step);
+      g_usleep(params->settle_ms * 1000);
+    }
+
+    if(dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED)
+      break;
+
+    // capture, reusing the regular tethered capture/download path so
+    // that already captured frames stay imported even if the sequence
+    // is cancelled or fails part-way through
+    dt_camctl_camera_capture(darktable.camctl, NULL);
+
+    fraction += 1.0 / total;
+    dt_control_job_set_progress(job, fraction);
+  }
+
+  return 0;
+}
+
+dt_job_t *dt_camera_focus_bracket_job_create(const uint32_t frames,
+                                             const uint32_t step,
+                                             const gboolean near,
+                                             const uint32_t settle_ms,
+                                             const gboolean prefocus,
+                                             const uint32_t af_hold_ms)
+{
+  dt_job_t *job = dt_control_job_create(&dt_camera_focus_bracket_job_run,
+                                        "focus bracket capture of image(s)");
+  if(!job)
+    return NULL;
+
+  dt_camera_focus_bracket_t *params = calloc(1, sizeof(dt_camera_focus_bracket_t));
+  if(!params)
+  {
+    dt_control_job_dispose(job);
+    return NULL;
+  }
+  dt_control_job_add_progress(job, _("focus bracket"), TRUE);
+  dt_control_job_set_params(job, params, free);
+
+  params->frames = MAX(2u, frames);
+  params->step = CLAMP(step, 1u, 7u);
+  params->near = near;
+  params->settle_ms = settle_ms;
+  params->prefocus = prefocus;
+  params->af_hold_ms = af_hold_ms;
   return job;
 }
 
