@@ -107,6 +107,46 @@ static void _darkroom_display_second_window(dt_develop_t *dev);
 static void _darkroom_ui_second_window_write_config(GtkWidget *widget);
 static void _darkroom_ui_second_window_cleanup(dt_develop_t *dev);
 
+static gboolean _darkroom_iop_expanded(const char *op)
+{
+  char option[1024];
+  snprintf(option, sizeof(option), "plugins/darkroom/%s/expanded", op);
+  const gboolean expanded = dt_conf_get_bool(option);
+  return expanded;
+}
+// "plugins/darkroom/<op>/expanded" is per-operation, while focus is restored
+// onto a single instance of that operation. The expansion state was applied to
+// instance 0 regardless, so with several instances one of them came back
+// expanded and a different one focused; with "only one module expanded" that is
+// a state the user cannot produce by hand. Called once focus has been restored,
+// this hands the operation's expansion state to the instance that actually got
+// the focus. Its siblings are only collapsed in "only one module expanded"
+// mode, where two expanded instances would be just as wrong.
+static void _expand_focused_instance(dt_develop_t *dev)
+{
+  dt_iop_module_t *focused = dt_dev_gui_module();
+  if(!focused) return;
+
+  const gboolean expanded = _darkroom_iop_expanded(focused->op);
+  const gboolean single = dt_conf_get_bool("darkroom/ui/single_module");
+
+  for(const GList *modules = dev->iop; modules; modules = g_list_next(modules))
+  {
+    dt_iop_module_t *module = modules->data;
+    if(!dt_iop_module_is(module, focused->op)) continue;
+
+    const gboolean want = module == focused
+      ? expanded
+      : (single ? FALSE : module->expanded);
+
+    if(module->expanded != want)
+    {
+      module->expanded = want;
+      dt_iop_gui_update_expanded(module);
+    }
+  }
+}
+
 const char *name(const dt_view_t *self)
 {
   return _("darkroom");
@@ -273,20 +313,12 @@ static dt_darkroom_layout_t _lib_darkroom_get_layout(dt_view_t *self)
   return DT_DARKROOM_LAYOUT_EDITING;
 }
 
-static gboolean _darkroom_module_is_active(const dt_view_t *view,
-                                           const dt_iop_module_t *module)
+static gboolean _darkroom_module_is_active(const dt_iop_module_t *module)
 {
-  if(!view || !module || view != dt_view_manager_get_current_view(darktable.view_manager)
-     || view->data != darktable.develop)
-    return FALSE;
-
-  // Trouble messages are delivered asynchronously and carry a borrowed module
-  // pointer.  Compare pointers while walking the live IOP list before reading
-  // anything from the payload; the old darkroom may have freed the module
-  // while its queued signal was waiting for the GUI thread.
-  const dt_develop_t *dev = view->data;
-  for(const GList *iter = dev->iop; iter; iter = g_list_next(iter))
-    if(iter->data == module)
+  // Compare module and it's gui stuff while walking the IOP list as darkroom may have
+  // freed the module while its queued signal was waiting for the GUI thread.
+  for(const GList *iter = darktable.develop->iop; iter; iter = g_list_next(iter))
+    if(iter->data == module && module->gui_data && module->widget)
       return TRUE;
 
   return FALSE;
@@ -297,9 +329,13 @@ void _display_module_trouble_message_callback(gpointer instance,
                                               const char *const trouble_msg,
                                               const char *const trouble_tooltip)
 {
-  if(!_darkroom_module_is_active(instance, module)
-     || !module->gui_data
-     || !module->widget)
+  if(!module || !instance || dt_view_get_current() != DT_VIEW_DARKROOM)
+    return;
+
+  const gboolean active = _darkroom_module_is_active(module);
+  dt_print(DT_DEBUG_DEV, "%s trouble for `%s` active=%s",
+    trouble_msg ? trouble_msg : "cleared", module->name(), STR_YESNO(active));
+  if(!active)
     return;
 
   GtkWidget *label_widget = NULL;
@@ -1565,7 +1601,6 @@ static gboolean _dev_load_requested_image(gpointer user_data)
   dt_dev_read_history(dev);
 
   // we have to init all module instances other than "base" instance
-  char option[1024];
   for(const GList *modules = g_list_last(dev->iop);
       modules;
       modules = g_list_previous(modules))
@@ -1589,8 +1624,7 @@ static gboolean _dev_load_requested_image(gpointer user_data)
       {
         // Make sure module header buttons are reset to a safe state
         dt_iop_show_hide_header_buttons(module, NULL, FALSE, FALSE);
-        snprintf(option, sizeof(option), "plugins/darkroom/%s/expanded", module->op);
-        module->expanded = dt_conf_get_bool(option);
+        module->expanded = _darkroom_iop_expanded(module->op);
         dt_iop_gui_update_expanded(module);
         if(module->change_image) module->change_image(module);
         dt_iop_gui_update_header(module);
@@ -1617,6 +1651,8 @@ static gboolean _dev_load_requested_image(gpointer user_data)
 
   /* Now we can request focus again and write a safe plugins/darkroom/active */
   const char *active_plugin = dt_conf_get_string_const("plugins/darkroom/active");
+  const gboolean expanded = _darkroom_iop_expanded(active_plugin);
+
   if(active_plugin)
   {
     gboolean valid = FALSE;
@@ -1626,7 +1662,7 @@ static gboolean _dev_load_requested_image(gpointer user_data)
       if(dt_iop_module_is(module, active_plugin))
       {
         valid = TRUE;
-        dt_iop_request_focus(module);
+        dt_iop_request_focus(expanded ? module : NULL);
       }
     }
     if(!valid)
@@ -1634,6 +1670,7 @@ static gboolean _dev_load_requested_image(gpointer user_data)
       dt_conf_set_string("plugins/darkroom/active", "");
     }
   }
+  _expand_focused_instance(dev);
 
   // Signal develop initialize
   DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_DEVELOP_IMAGE_CHANGED);
@@ -4045,8 +4082,6 @@ void enter(dt_view_t *self)
   GtkScrolledWindow *sw = GTK_SCROLLED_WINDOW(gtk_widget_get_ancestor(box, GTK_TYPE_SCROLLED_WINDOW));
   if(sw) gtk_scrolled_window_set_propagate_natural_width(sw, FALSE);
 
-  char option[1024];
-
   for(const GList *modules = g_list_last(dev->iop);
       modules;
       modules = g_list_previous(modules))
@@ -4063,8 +4098,7 @@ void enter(dt_view_t *self)
 
       if(module->multi_priority == 0)
       {
-        snprintf(option, sizeof(option), "plugins/darkroom/%s/expanded", module->op);
-        module->expanded = dt_conf_get_bool(option);
+        module->expanded = _darkroom_iop_expanded(module->op);
         dt_iop_gui_update_expanded(module);
       }
 
@@ -4096,6 +4130,7 @@ void enter(dt_view_t *self)
         dt_iop_request_focus(module);
     }
   }
+  _expand_focused_instance(dev);
 
   // image should be there now.
   dt_dev_zoom_move(&dev->full, DT_ZOOM_MOVE, -1.f, 1, 0.0f, 0.0f, TRUE);

@@ -22,6 +22,7 @@
 // Otherwise, it may optimize away conditionals based on isnan() or
 // isfinite().
 
+#include <glib-2.0/glib-object.h>
 #ifdef __GNUC__
 #pragma GCC optimize ("no-finite-math-only")
 #endif
@@ -32,21 +33,15 @@
 #include "common/imagebuf.h"
 #include "common/opencl.h"
 #include "common/utility.h"
-#include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
 #include "develop/imageop_gui.h"
 #include "develop/tiling.h"
-#include "dtgtk/button.h"
-#include "dtgtk/resetlabel.h"
-#include "gui/accelerators.h"
-#include "gui/draw.h"
 #include "gui/gtk.h"
 #include "iop/iop_api.h"
 
 #include <ctype.h>
 #include <gtk/gtk.h>
-#include <inttypes.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -451,8 +446,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
 
     // old versions had R and B swapped
     n->tca_r = o->tca_b;
@@ -519,8 +514,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
 
@@ -586,8 +581,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
 
@@ -654,8 +649,8 @@ int legacy_params(dt_iop_module_t *self,
     n->distance = o->distance;
     n->target_geom = _lenstype_from_lensfun_lenstype(o->target_geom);
     n->tca_override = o->tca_override;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
 
@@ -726,8 +721,8 @@ int legacy_params(dt_iop_module_t *self,
     n->aperture = o->aperture;
     n->distance = o->distance;
     n->target_geom = (dt_iop_lens_lenstype_t)o->target_geom;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_override = o->tca_override;
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
@@ -800,8 +795,8 @@ int legacy_params(dt_iop_module_t *self,
     n->aperture = o->aperture;
     n->distance = o->distance;
     n->target_geom = (dt_iop_lens_lenstype_t)o->target_geom;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_override = o->tca_override;
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
@@ -875,8 +870,8 @@ int legacy_params(dt_iop_module_t *self,
     n->aperture = o->aperture;
     n->distance = o->distance;
     n->target_geom = (dt_iop_lens_lenstype_t)o->target_geom;
-    g_strlcpy(n->camera, o->camera, sizeof(n->camera));
-    g_strlcpy(n->lens, o->lens, sizeof(n->lens));
+    dt_strlcpy_fixed_to_fixed(n->camera, sizeof(n->camera), o->camera, sizeof(o->camera));
+    dt_strlcpy_fixed_to_fixed(n->lens, sizeof(n->lens), o->lens, sizeof(o->lens));
     n->tca_override = o->tca_override;
     n->tca_r = o->tca_r;
     n->tca_b = o->tca_b;
@@ -1062,6 +1057,7 @@ static void _process_lf(dt_iop_module_t *self,
 
   if(!d->lens || !d->lens->Maker || d->crop <= 0.0f)
   {
+    dt_print_pipe(DT_DEBUG_PIPE, "lensfun bypass", piece->pipe, self, piece->pipe->devid, roi_in, roi_out);
     dt_iop_image_copy_by_size((float*)ovoid, (float*)ivoid,
                               roi_out->width, roi_out->height, ch);
     return;
@@ -1334,8 +1330,11 @@ static int _process_cl_lf(dt_iop_module_t *self,
   const dt_interpolation_t *interpolation = dt_interpolation_new(DT_INTERPOLATION_USERPREF_WARP);
 
   if(!d->lens || !d->lens->Maker || d->crop <= 0.0f)
+  {
+    dt_print_pipe(DT_DEBUG_PIPE, "lensfun bypass", piece->pipe, self, piece->pipe->devid, roi_in, roi_out);
     return dt_opencl_enqueue_copy_image(devid, dev_in, dev_out,
                                         CLIMG_ORIGIN, CLIMG_ORIGIN, oregion);
+  }
 
   switch(interpolation->id)
   {
@@ -3053,7 +3052,14 @@ void process(dt_iop_module_t *self,
 {
   dt_iop_lens_data_t *d = (dt_iop_lens_data_t *)piece->data;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
-  const gboolean mask = g && g->vig_masking && dt_pipe_is_full(piece->pipe);
+  gboolean mask = FALSE;
+  if(g && dt_pipe_is_full(piece->pipe))
+  {
+    dt_iop_gui_enter_critical_section(self);
+    mask = g->vig_masking;
+    dt_iop_gui_leave_critical_section(self);
+  }
+
   const gboolean pre_vignette = mask || (d->v_strength > 0.0f);
   const gboolean pass_mode = piece->pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
   float *data = (float *)ivoid;
@@ -3132,7 +3138,14 @@ int process_cl(dt_iop_module_t *self,
 
   dt_iop_lens_data_t *d = (dt_iop_lens_data_t *)piece->data;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
-  const gboolean mask = g && g->vig_masking && dt_pipe_is_full(piece->pipe);
+
+  gboolean mask = FALSE;
+  if(g && dt_pipe_is_full(piece->pipe))
+  {
+    dt_iop_gui_enter_critical_section(self);
+    mask = g->vig_masking ;
+    dt_iop_gui_leave_critical_section(self);
+  }
   const gboolean pre_vignette = mask || (d->v_strength > 0.0f);
   const gboolean pass_mode = piece->pipe->mask_display == DT_DEV_PIXELPIPE_DISPLAY_PASSTHRU;
 
@@ -3315,6 +3328,10 @@ void commit_params(dt_iop_module_t *self,
     p = (dt_iop_lens_params_t *)self->default_params;
     p->method = _get_method(self, method);
   }
+
+  // stored params need not terminate the camera and lens names
+  p->camera[sizeof(p->camera) - 1] = '\0';
+  p->lens[sizeof(p->lens) - 1] = '\0';
 
   d->method = p->method;
   d->modify_flags = p->modify_flags;
@@ -3827,27 +3844,33 @@ static void _camera_set(dt_iop_module_t *self, const lfCamera *cam)
   g_free(fm);
 }
 
-static void _camera_menu_select(GtkMenuItem *menuitem, dt_iop_module_t *self)
+static void _camera_menu_select(GSimpleAction *action,
+                                GVariant *parameter,
+                                gpointer user_data)
 {
-  _camera_set(self, (lfCamera *)g_object_get_data(G_OBJECT(menuitem),
-                                                  "lfCamera"));
-  DT_GUARD_GUI_UPDATE();
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   dt_iop_lens_params_t *p = (dt_iop_lens_params_t *)self->params;
+  
+  const lfCamera *cam = (lfCamera *)g_variant_get_uint64(parameter);
+  _camera_set(self, cam);
+
+  DT_GUARD_GUI_UPDATE();
   p->has_been_set = TRUE;
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-static GtkMenu *camera_menu_fill(dt_iop_module_t *self,
-                                 const lfCamera *const *camlist)
+static GMenu *camera_menu_fill(dt_iop_module_t *self,
+                               const lfCamera *const *camlist)
 {
-  GtkMenu *camera_menu = GTK_MENU(gtk_menu_new());
+  GMenu *camera_menu = g_menu_new();
 
   /* Count all existing camera makers and create a sorted list */
   GPtrArray *makers = g_ptr_array_new();
   GPtrArray *submenus = g_ptr_array_new();
   for(unsigned i = 0; camlist[i]; i++)
   {
-    GtkWidget *submenu, *item;
+    GMenuItem *item;
+    GMenu *submenu;
     const char *m = lf_mlstr_get(camlist[i]->Maker);
     int idx = _ptr_array_find_sorted(makers, m, (GCompareFunc)g_utf8_collate);
     if(idx < 0)
@@ -3855,36 +3878,40 @@ static GtkMenu *camera_menu_fill(dt_iop_module_t *self,
       /* No such maker yet, insert it into the array */
       idx = _ptr_array_insert_sorted(makers, m, (GCompareFunc)g_utf8_collate);
       /* Create a submenu for cameras by this maker */
-      submenu = gtk_menu_new();
+      submenu = g_menu_new();
       _ptr_array_insert_index(submenus, submenu, idx);
     }
 
-    submenu = (GtkWidget *)g_ptr_array_index(submenus, idx);
+    submenu = (GMenu *)g_ptr_array_index(submenus, idx);
     /* Append current camera name to the submenu */
     m = lf_mlstr_get(camlist[i]->Model);
     if(!camlist[i]->Variant)
-      item = gtk_menu_item_new_with_label(m);
+    {
+      item = g_menu_item_new(m, NULL);
+      g_menu_item_set_action_and_target_value(item,
+                                              "camera.activate",
+                                              g_variant_new("t", (guintptr)camlist[i]));
+    }
     else
     {
       gchar *fm = g_strdup_printf("%s (%s)", m, camlist[i]->Variant);
-      item = gtk_menu_item_new_with_label(fm);
+      item = g_menu_item_new(fm, NULL);
+      g_menu_item_set_action_and_target_value(item,
+                                              "camera.activate",
+                                              g_variant_new("t", (guintptr)camlist[i]));
       g_free(fm);
     }
-    gtk_widget_show(item);
-    g_object_set_data(G_OBJECT(item), "lfCamera", (void *)camlist[i]);
-    g_signal_connect(G_OBJECT(item), "activate",
-                     G_CALLBACK(_camera_menu_select), self);
-    gtk_menu_shell_append(GTK_MENU_SHELL(submenu), item);
+    g_menu_append_item(submenu, item);
+    g_object_unref(item);
   }
 
+  // create the submenus for the makers
   for(unsigned i = 0; i < makers->len; i++)
   {
-    GtkWidget *item = (GtkWidget *)
-      gtk_menu_item_new_with_label((const gchar *)g_ptr_array_index(makers, i));
-    gtk_widget_show(item);
-    gtk_menu_shell_append(GTK_MENU_SHELL(camera_menu), item);
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-                              (GtkWidget *)g_ptr_array_index(submenus, i));
+    GMenuItem *item = g_menu_item_new_submenu((const gchar *)g_ptr_array_index(makers, i),
+                                              G_MENU_MODEL(g_ptr_array_index(submenus, i)));
+    g_menu_append_item(camera_menu, item);
+    g_object_unref(item);
   }
 
   g_ptr_array_free(submenus, TRUE);
@@ -3904,8 +3931,33 @@ static void _parse_model(const char *txt,
   model[len] = 0;
 }
 
-static void _camera_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
+static void _set_camera_action_group(GtkWidget *button,
+                                     dt_iop_module_t *self)
 {
+  GActionGroup *action_group = gtk_widget_get_action_group(button, "camera");
+  if(action_group == NULL)
+  {
+    GActionEntry action_entries[] =
+    {
+      { "activate", _camera_menu_select, "t", NULL }
+    };
+
+    action_group = G_ACTION_GROUP(g_simple_action_group_new());
+    g_action_map_add_action_entries(G_ACTION_MAP(action_group),
+                                    action_entries,
+                                    G_N_ELEMENTS(action_entries),
+                                    self);
+    gtk_widget_insert_action_group(button,
+                                   "camera",
+                                   G_ACTION_GROUP(action_group));
+  }
+}
+
+static void _camera_menusearch_clicked(GtkWidget *button,
+                                       dt_iop_module_t *self)
+{
+  _set_camera_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
 
@@ -3914,21 +3966,25 @@ static void _camera_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
   camlist = dt_iop_lensfun_db->GetCameras();
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
   if(!camlist) return;
-  GtkMenu *menu = camera_menu_fill(self, camlist);
+  GMenu *menu = camera_menu_fill(self, camlist);
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH, GDK_GRAVITY_NORTH);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
-static void _camera_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
+static void _camera_autosearch_clicked(GtkWidget *button,
+                                       dt_iop_module_t *self)
 {
+  _set_camera_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
 
   char make[200], model[200];
   const gchar *txt = (const gchar *)((dt_iop_lens_params_t *)self->default_params)->camera;
 
-  GtkMenu *menu;
+  GMenu *menu;
   if(txt[0] == '\0')
   {
     const lfCamera *const *camlist;
@@ -3949,8 +4005,9 @@ static void _camera_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
     lf_free(camlist);
   }
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
 /* -- end camera -- */
@@ -4176,12 +4233,16 @@ static void _lens_set(dt_iop_module_t *self,
   }
 }
 
-static void _lens_menu_select(GtkMenuItem *menuitem,
-                              dt_iop_module_t *self)
+static void _lens_menu_select(GSimpleAction *action,
+                              GVariant *parameter,
+                              gpointer user_data)
 {
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   dt_iop_lens_params_t *p = (dt_iop_lens_params_t *)self->params;
-  _lens_set(self, (lfLens *)g_object_get_data(G_OBJECT(menuitem), "lfLens"));
+
+  const lfLens *lens = (lfLens *)g_variant_get_uint64(parameter);
+  _lens_set(self, lens);
   DT_GUARD_GUI_UPDATE();
   p->has_been_set = TRUE;
 
@@ -4190,17 +4251,18 @@ static void _lens_menu_select(GtkMenuItem *menuitem,
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
 
-static GtkMenu *_lens_menu_fill(dt_iop_module_t *self,
+static GMenu *_lens_menu_fill(dt_iop_module_t *self,
                                 const lfLens *const *lenslist)
 {
-  GtkMenu *lens_menu = GTK_MENU(gtk_menu_new());
+  GMenu *lens_menu = g_menu_new();
 
   /* Count all existing lens makers and create a sorted list */
   GPtrArray *makers = g_ptr_array_new();
   GPtrArray *submenus = g_ptr_array_new();
   for(unsigned i = 0; lenslist[i]; i++)
   {
-    GtkWidget *submenu, *item;
+    GMenuItem *item;
+    GMenu *submenu;
     const char *m = lf_mlstr_get(lenslist[i]->Maker);
     int idx = _ptr_array_find_sorted(makers, m, (GCompareFunc)g_utf8_collate);
     if(idx < 0)
@@ -4208,28 +4270,27 @@ static GtkMenu *_lens_menu_fill(dt_iop_module_t *self,
       /* No such maker yet, insert it into the array */
       idx = _ptr_array_insert_sorted(makers, m, (GCompareFunc)g_utf8_collate);
       /* Create a submenu for lenses by this maker */
-      submenu = gtk_menu_new();
+      submenu = g_menu_new();
       _ptr_array_insert_index(submenus, submenu, idx);
     }
 
-    submenu = (GtkWidget *)g_ptr_array_index(submenus, idx);
+    submenu = (GMenu *)g_ptr_array_index(submenus, idx);
     /* Append current lens name to the submenu */
-    item = gtk_menu_item_new_with_label(lf_mlstr_get(lenslist[i]->Model));
-    gtk_widget_show(item);
-    g_object_set_data(G_OBJECT(item), "lfLens", (void *)lenslist[i]);
-    g_signal_connect(G_OBJECT(item), "activate",
-                     G_CALLBACK(_lens_menu_select), self);
-    gtk_menu_shell_append(GTK_MENU_SHELL(submenu), item);
+    item = g_menu_item_new(lf_mlstr_get(lenslist[i]->Model), NULL);
+    g_menu_item_set_action_and_target_value(item,
+                                            "lens.activate",
+                                            g_variant_new("t", (guintptr)lenslist[i]));
+    g_menu_append_item(submenu, item);    
+    g_object_unref(item);
   }
 
+  // create the submenus for the makers
   for(unsigned i = 0; i < makers->len; i++)
   {
-    GtkWidget *item = gtk_menu_item_new_with_label
-      ((const gchar *)g_ptr_array_index(makers, i));
-    gtk_widget_show(item);
-    gtk_menu_shell_append(GTK_MENU_SHELL(lens_menu), item);
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-                              (GtkWidget *)g_ptr_array_index(submenus, i));
+    GMenuItem *item = g_menu_item_new_submenu((const gchar *)g_ptr_array_index(makers, i),
+                                              G_MENU_MODEL(g_ptr_array_index(submenus, i)));
+    g_menu_append_item(lens_menu, item);
+    g_object_unref(item);
   }
 
   g_ptr_array_free(submenus, TRUE);
@@ -4237,14 +4298,37 @@ static GtkMenu *_lens_menu_fill(dt_iop_module_t *self,
   return lens_menu;
 }
 
-static void _lens_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
+static void _set_lens_action_group(GtkWidget *button,
+                                   dt_iop_module_t *self)
 {
+  GActionGroup *action_group = gtk_widget_get_action_group(button, "lens");
+  if(action_group == NULL)
+  {
+    GActionEntry action_entries[] =
+    {
+      { "activate", _lens_menu_select, "t", NULL }
+    };
+
+    action_group = G_ACTION_GROUP(g_simple_action_group_new());
+    g_action_map_add_action_entries(G_ACTION_MAP(action_group),
+                                    action_entries,
+                                    G_N_ELEMENTS(action_entries),
+                                    self);
+    gtk_widget_insert_action_group(button,
+                                   "lens",
+                                   G_ACTION_GROUP(action_group));
+  }
+}
+
+static void _lens_menusearch_clicked(GtkWidget *button,
+                                     dt_iop_module_t *self)
+{
+  _set_lens_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   const lfLens **lenslist;
-
-  (void)button;
 
   dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
   lenslist = dt_iop_lensfun_db->FindLenses(g->camera, NULL, NULL,
@@ -4252,23 +4336,24 @@ static void _lens_menusearch_clicked(GtkWidget *button, dt_iop_module_t *self)
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
 
   if(!lenslist) return;
-  GtkMenu *menu = _lens_menu_fill(self, lenslist);
+  GMenu *menu = _lens_menu_fill(self, lenslist);
   lf_free(lenslist);
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH, GDK_GRAVITY_NORTH);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
 static void _lens_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
 {
+  _set_lens_action_group(button, self);
+
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   const lfLens **lenslist;
   char model[200];
   const gchar *txt = ((dt_iop_lens_params_t *)self->default_params)->lens;
-
-  (void)button;
 
   _parse_model(txt, model, sizeof(model));
   dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
@@ -4277,11 +4362,12 @@ static void _lens_autosearch_clicked(GtkWidget *button, dt_iop_module_t *self)
                                            LF_SEARCH_SORT_AND_UNIQUIFY);
   dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
   if(!lenslist) return;
-  GtkMenu *menu = _lens_menu_fill(self, lenslist);
+  GMenu *menu = _lens_menu_fill(self, lenslist);
   lf_free(lenslist);
 
-  // dt_gui_menu_popup unrefs the menu
-  dt_gui_menu_popup(menu, button, GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(button, menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 }
 
 /* -- end lens -- */
@@ -4307,18 +4393,18 @@ static void _display_errors(dt_iop_module_t *self)
      && self->enabled
      && p->method == DT_IOP_LENS_METHOD_LENSFUN)
   {
-    dt_iop_set_module_trouble_message
-      (self, _("camera/lens not found"),
+    dt_iop_set_module_trouble_message(self,
+       _("camera/lens not found"),
        _("pick a camera or lens from the buttons below --\n"
          "the lens button lists the whole database when the body is unknown\n"
          "scale, target geometry and the TCA override work without a profile\n"
          "you might also want to check if your Lensfun database is up-to-date\n"
          "by running lensfun-update-data"),
-       "camera/lens not found");
+       "");
   }
   else
   {
-    dt_iop_set_module_trouble_message(self, NULL, NULL, NULL);
+    dt_iop_clear_module_trouble_message(self);
   }
 
   gtk_widget_queue_draw(self->widget);
@@ -4431,26 +4517,22 @@ static void _have_corrections_done(gpointer instance, dt_iop_module_t *self)
   gtk_widget_set_tooltip_text(GTK_WIDGET(g->message), Q_(message));
 }
 
-static void _develop_ui_pipe_finished_callback(gpointer instance,
-                                               dt_iop_module_t *self)
-{
-  _display_errors(self);
-}
-
 static void _visualize_callback(GtkWidget *quad,
                                 dt_iop_module_t *self)
 {
   DT_GUARD_GUI_UPDATE();
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
+
+  dt_iop_gui_enter_critical_section(self);
   g->vig_masking = dt_bauhaus_widget_get_quad_active(quad);
+  dt_iop_gui_leave_critical_section(self);
+
   dt_dev_reprocess_center(self->dev, self->iop_order);
 }
 
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_lens_gui_data_t *g = IOP_GUI_ALLOC(lens);
-
-  DT_CONTROL_SIGNAL_HANDLE(DT_SIGNAL_DEVELOP_UI_PIPE_FINISHED, _develop_ui_pipe_finished_callback);
 
   dt_iop_gui_enter_critical_section(self); // not actually needed,
                                            // we're the only one with
@@ -4696,9 +4778,12 @@ void gui_focus(dt_iop_module_t *self, gboolean in)
   dt_iop_lens_gui_data_t *g = (dt_iop_lens_gui_data_t *)self->gui_data;
   if(!in)
   {
+    dt_iop_gui_enter_critical_section(self);
     const gboolean was_visualize = g->vig_masking;
     dt_bauhaus_widget_set_quad_active(g->v_strength, FALSE);
     g->vig_masking = FALSE;
+    dt_iop_gui_leave_critical_section(self);
+
     if(was_visualize)
       dt_dev_reprocess_center(self->dev, self->iop_order);
   }
@@ -4722,6 +4807,10 @@ void gui_update(dt_iop_module_t *self)
     memcpy(self->params, self->default_params, sizeof(dt_iop_lens_params_t));
     p->method = _get_method(self, method);
   }
+
+  // the GUI handlers read the stored camera and lens names as C strings
+  p->camera[sizeof(p->camera) - 1] = '\0';
+  p->lens[sizeof(p->lens) - 1] = '\0';
 
   dt_iop_lens_global_data_t *gd = (dt_iop_lens_global_data_t *)self->global_data;
   lfDatabase *dt_iop_lensfun_db = (lfDatabase *)gd->db;

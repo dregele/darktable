@@ -50,6 +50,8 @@
 #include "gui/splash.h"
 #include "imageio/imageio_rawspeed.h"
 #include "libs/modulegroups.h"
+#include <glib-2.0/gio/gio.h>
+#include <gtk/gtk.h>
 #ifdef GDK_WINDOWING_QUARTZ
 #include "osx/osx.h"
 #endif
@@ -73,6 +75,23 @@ typedef struct dt_iop_gui_multi_show_t
 {
   gboolean close, up, down, new;
 } dt_iop_gui_multi_show_t;
+
+static void _gui_copy_callback(GSimpleAction *action, GVariant *parameter, gpointer user_data);
+static void _gui_duplicate_callback(GSimpleAction *action, GVariant *parameter, gpointer user_data);
+static void _gui_moveup_callback(GSimpleAction *action, GVariant *parameter, gpointer user_data);
+static void _gui_movedown_callback(GSimpleAction *action, GVariant *parameter, gpointer user_data);
+static void _gui_delete_callback(GSimpleAction *action, GVariant *parameter, gpointer user_data);
+static void _gui_rename_callback(GSimpleAction *action, GVariant *parameter, gpointer user_data);
+
+// action entries for the instance menu items
+static GActionEntry _instance_action_entries[] = {
+  { "new",          _gui_copy_callback,      NULL, NULL },
+  { "duplicate",    _gui_duplicate_callback, NULL, NULL },
+  { "moveup",       _gui_moveup_callback,    NULL, NULL },
+  { "movedown",     _gui_movedown_callback,  NULL, NULL },
+  { "delete",       _gui_delete_callback,    NULL, NULL },
+  { "rename",       _gui_rename_callback,    NULL, NULL },
+};
 
 void dt_iop_load_default_params(dt_iop_module_t *module)
 {
@@ -383,6 +402,12 @@ gboolean dt_iop_load_module_by_so(dt_iop_module_t *module,
   module->enabled = module->default_enabled = FALSE; // all modules disabled by default.
   g_strlcpy(module->op, so->op, sizeof(module->op));
   module->raster_mask.source.users = g_hash_table_new(NULL, NULL);
+  // recursive: the GUI asks whether a source's mask is used while holding its lock
+  pthread_mutexattr_t recursive_locking;
+  pthread_mutexattr_init(&recursive_locking);
+  pthread_mutexattr_settype(&recursive_locking, PTHREAD_MUTEX_RECURSIVE);
+  dt_pthread_mutex_init(&module->raster_mask.source.users_lock, &recursive_locking);
+  pthread_mutexattr_destroy(&recursive_locking);
   module->raster_mask.source.masks =
     g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
   module->raster_mask.sink.source = NULL;
@@ -527,8 +552,11 @@ static void _header_motion_notify_hide_callback(GtkEventControllerMotion *contro
   dt_iop_show_hide_header_buttons(module, NULL, FALSE, FALSE);
 }
 
-static void _gui_delete_callback(GtkButton *button, dt_iop_module_t *module)
+static void _gui_delete_callback(GSimpleAction *action,
+                                 GVariant *parameter,
+                                 gpointer user_data)
 {
+  dt_iop_module_t *module = (dt_iop_module_t *)user_data;
   dt_develop_t *dev = module->dev;
 
   // we search another module with the same base
@@ -539,7 +567,7 @@ static void _gui_delete_callback(GtkButton *button, dt_iop_module_t *module)
   while(modules)
   {
     dt_iop_module_t *mod = modules->data;
-    if(mod == module)
+if(mod == module)
     {
       find = TRUE;
       if(next) break;
@@ -632,9 +660,7 @@ static void _gui_delete_callback(GtkButton *button, dt_iop_module_t *module)
   dt_control_queue_redraw_center();
 
   DT_LEAVE_GUI_UPDATE();
-}
-
-dt_iop_module_t *dt_iop_gui_get_previous_visible_module(const dt_iop_module_t *module)
+}dt_iop_module_t *dt_iop_gui_get_previous_visible_module(const dt_iop_module_t *module)
 {
   dt_iop_module_t *prev = NULL;
 
@@ -686,8 +712,11 @@ dt_iop_module_t *dt_iop_gui_get_next_visible_module(const dt_iop_module_t *modul
   return next;
 }
 
-static void _gui_movedown_callback(GtkButton *button, dt_iop_module_t *module)
+static void _gui_movedown_callback(GSimpleAction *action,
+                                   GVariant *parameter,
+                                   gpointer user_data)
 {
+  dt_iop_module_t *module = (dt_iop_module_t *)user_data;
   dt_ioppr_check_iop_order(module->dev, 0, "dt_iop_gui_movedown_callback begin");
 
   // we need to place this module right before the previous
@@ -721,8 +750,11 @@ static void _gui_movedown_callback(GtkButton *button, dt_iop_module_t *module)
   DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_DEVELOP_MODULE_MOVED);
 }
 
-static void _gui_moveup_callback(GtkButton *button, dt_iop_module_t *module)
+static void _gui_moveup_callback(GSimpleAction *action,
+                                 GVariant *parameter,
+                                 gpointer user_data)
 {
+  dt_iop_module_t *module = (dt_iop_module_t *)user_data;
   dt_ioppr_check_iop_order(module->dev, 0, "dt_iop_gui_moveup_callback begin");
 
   // we need to place this module right after the next one
@@ -855,11 +887,14 @@ dt_iop_module_t *dt_iop_gui_duplicate(dt_iop_module_t *base,
 
 void dt_iop_gui_delete(dt_iop_module_t *module)
 {
-  _gui_delete_callback(NULL, module);
+  _gui_delete_callback(NULL, NULL, module);
 }
 
-static void _gui_copy_callback(GtkButton *button, dt_iop_module_t *base)
+static void _gui_copy_callback(GSimpleAction *action,
+                               GVariant *parameter,
+                               gpointer user_data)
 {
+  dt_iop_module_t *base = (dt_iop_module_t *) user_data;
   dt_iop_module_t *module = dt_iop_gui_duplicate(base, FALSE);
 
   /* setup key accelerators */
@@ -869,8 +904,11 @@ static void _gui_copy_callback(GtkButton *button, dt_iop_module_t *base)
     dt_iop_gui_rename_module(module);
 }
 
-static void _gui_duplicate_callback(GtkButton *button, dt_iop_module_t *base)
+static void _gui_duplicate_callback(GSimpleAction *action,
+                                    GVariant *parameter,
+                                    gpointer user_data)
 {
+  dt_iop_module_t *base = (dt_iop_module_t *)user_data;
   dt_iop_module_t *module = dt_iop_gui_duplicate(base, TRUE);
 
   /* setup key accelerators */
@@ -997,9 +1035,11 @@ void dt_iop_gui_rename_module(dt_iop_module_t *module)
   gtk_widget_grab_focus(entry);
 }
 
-static void _gui_rename_callback(GtkButton *button,
-                                 dt_iop_module_t *module)
+static void _gui_rename_callback(GSimpleAction *action,
+                                 GVariant *parameter,
+                                 gpointer user_data)
 {
+  dt_iop_module_t *module = (dt_iop_module_t *)user_data;
   dt_iop_gui_rename_module(module);
 }
 
@@ -1047,52 +1087,40 @@ static void _gui_multiinstance_callback(GtkButton *button,
   dt_iop_gui_multi_show_t multi_show;
   _get_multi_show(module, &multi_show);
 
-  GtkMenuShell *menu = GTK_MENU_SHELL(gtk_menu_new());
-  GtkWidget *item;
+  GMenu *menu = g_menu_new();
 
-  item = gtk_menu_item_new_with_label(_("new instance"));
-  // gtk_widget_set_tooltip_text(item, _("add a new instance of this module to the pipe"));
-  g_signal_connect(G_OBJECT(item), "activate",
-                   G_CALLBACK(_gui_copy_callback), module);
-  gtk_widget_set_sensitive(item, multi_show.new);
-  gtk_menu_shell_append(menu, item);
+  g_menu_append(menu, _("new instance"), "instances.new");
+  g_menu_append(menu, _("duplicate instance"), "instances.duplicate");
+  g_menu_append(menu, _("move up"), "instances.moveup");
+  g_menu_append(menu, _("move down"), "instances.movedown");
+  g_menu_append(menu, _("delete this instance"), "instances.delete");
 
-  item = gtk_menu_item_new_with_label(_("duplicate instance"));
-  // gtk_widget_set_tooltip_text(item, _("add a copy of this instance to the pipe"));
-  g_signal_connect(G_OBJECT(item), "activate",
-                   G_CALLBACK(_gui_duplicate_callback), module);
-  gtk_widget_set_sensitive(item, multi_show.new);
-  gtk_menu_shell_append(menu, item);
+  GMenu *section = g_menu_new();
+  g_menu_append(section, _("rename"), "instances.rename");
+  g_menu_append_section(menu, NULL, G_MENU_MODEL(section));
+  
+  GActionGroup *action_group = gtk_widget_get_action_group(GTK_WIDGET(button), "instances");
+  GAction *action;
 
-  item = gtk_menu_item_new_with_label(_("move up"));
-  // gtk_widget_set_tooltip_text(item, _("move this instance up"));
-  g_signal_connect(G_OBJECT(item), "activate",
-                   G_CALLBACK(_gui_moveup_callback), module);
-  gtk_widget_set_sensitive(item, multi_show.up);
-  gtk_menu_shell_append(menu, item);
+  action = g_action_map_lookup_action (G_ACTION_MAP(action_group), "new");
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(action), multi_show.new);
 
-  item = gtk_menu_item_new_with_label(_("move down"));
-  // gtk_widget_set_tooltip_text(item, _("move this instance down"));
-  g_signal_connect(G_OBJECT(item), "activate",
-                   G_CALLBACK(_gui_movedown_callback), module);
-  gtk_widget_set_sensitive(item, multi_show.down);
-  gtk_menu_shell_append(menu, item);
+  action = g_action_map_lookup_action (G_ACTION_MAP(action_group), "duplicate");
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(action), multi_show.new);
 
-  item = gtk_menu_item_new_with_label(_("delete"));
-  // gtk_widget_set_tooltip_text(item, _("delete this instance"));
-  g_signal_connect(G_OBJECT(item), "activate",
-                   G_CALLBACK(_gui_delete_callback), module);
-  gtk_widget_set_sensitive(item, multi_show.close);
-  gtk_menu_shell_append(menu, item);
+  action = g_action_map_lookup_action (G_ACTION_MAP(action_group), "moveup");
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(action), multi_show.up);
 
-  gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
-  item = gtk_menu_item_new_with_label(_("rename"));
-  g_signal_connect(G_OBJECT(item), "activate",
-                   G_CALLBACK(_gui_rename_callback), module);
-  gtk_menu_shell_append(menu, item);
+  action = g_action_map_lookup_action (G_ACTION_MAP(action_group), "movedown");
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(action), multi_show.down);
 
-  dt_gui_menu_popup(GTK_MENU(menu), GTK_WIDGET(button),
-                    GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  action = g_action_map_lookup_action (G_ACTION_MAP(action_group), "delete");
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(action), multi_show.close);
+
+  // popup the menu
+  GtkWidget *popover_menu = dt_gui_popover_menu_from_model(GTK_WIDGET(button), menu);
+  g_object_unref(menu);
+  gtk_popover_popup(GTK_POPOVER(popover_menu));
 
   // make sure the button is deactivated now that the menu is opened
   if(button)
@@ -1130,7 +1158,7 @@ static void _gui_multiinstance_clicked(GtkGestureSingle *gesture,
   if(button == GDK_BUTTON_SECONDARY)
   {
     if(!(module->flags() & IOP_FLAGS_ONE_INSTANCE))
-      _gui_copy_callback(NULL, module);
+      _gui_copy_callback(NULL, NULL, module);
     return;
   }
   if(button == GDK_BUTTON_MIDDLE)
@@ -1415,14 +1443,14 @@ void dt_iop_set_module_trouble_message(dt_iop_module_t *const module,
                                        const char *const stderr_message)
 {
   //  first stderr message if any
-  if(stderr_message)
+  if(stderr_message || trouble_msg)
   {
     const dt_image_t *img = module ? &module->dev->image_storage : NULL;
     const char *name = module ? module->name() : "?";
 
-    dt_print(DT_DEBUG_ALWAYS, "Trouble: [%s] %s (%s %d)",
+    dt_print(DT_DEBUG_ALWAYS, "Trouble: [%s] '%s' (%s %d)",
              name,
-             stderr_message,
+             stderr_message ? stderr_message : trouble_msg,
              img ? img->filename : "?",
              img ? img->id : -1);
   }
@@ -1434,11 +1462,21 @@ void dt_iop_set_module_trouble_message(dt_iop_module_t *const module,
                             module, trouble_msg, trouble_tooltip);
 }
 
+void dt_iop_clear_module_trouble_message(dt_iop_module_t *const module)
+{
+  dt_iop_set_module_trouble_message(module, NULL, NULL, NULL);
+}
+
 void dt_iop_gui_init(dt_iop_module_t *module)
 {
   DT_ENTER_GUI_UPDATE();
   --darktable.bauhaus->skip_accel;
-  dt_pthread_mutex_init(&module->gui_lock, NULL);
+
+  pthread_mutexattr_t recursive_gui_lock;
+  pthread_mutexattr_init(&recursive_gui_lock);
+  pthread_mutexattr_settype(&recursive_gui_lock, PTHREAD_MUTEX_RECURSIVE);
+  dt_pthread_mutex_init(&module->gui_lock, &recursive_gui_lock);
+
   if(module->gui_init) module->gui_init(module);
   ++darktable.bauhaus->skip_accel;
   DT_LEAVE_GUI_UPDATE();
@@ -1993,6 +2031,7 @@ void dt_iop_cleanup_module(dt_iop_module_t *module)
   free(module->histogram);
   module->histogram = NULL;
   g_hash_table_destroy(module->raster_mask.source.users);
+  dt_pthread_mutex_destroy(&module->raster_mask.source.users_lock);
   g_hash_table_destroy(module->raster_mask.source.masks);
   module->raster_mask.source.users = NULL;
   module->raster_mask.source.masks = NULL;
@@ -2081,9 +2120,11 @@ void dt_iop_commit_blend_params(dt_iop_module_t *module,
     {
       if(candidate->multi_priority == blendop_params->raster_mask_instance)
       {
+        dt_iop_raster_users_lock(candidate);
         const gboolean new = g_hash_table_insert(candidate->raster_mask.source.users,
                             module,
                             GINT_TO_POINTER(blendop_params->raster_mask_id));
+        dt_iop_raster_users_unlock(candidate);
         module->raster_mask.sink.source = candidate;
         module->raster_mask.sink.id = blendop_params->raster_mask_id;
 
@@ -2144,11 +2185,13 @@ void dt_iop_commit_blend_params(dt_iop_module_t *module,
   dt_iop_module_t *sink_source = module->raster_mask.sink.source;
   if(sink_source)
   {
-    if(g_hash_table_remove(module->raster_mask.sink.source->raster_mask.source.users, module))
+    dt_iop_raster_users_lock(sink_source);
+    if(g_hash_table_remove(sink_source->raster_mask.source.users, module))
       dt_print_pipe(DT_DEBUG_PIPE | DT_DEBUG_MASKS | DT_DEBUG_VERBOSE,
                   "clear as raster user",
                   NULL, module, DT_DEVICE_NONE, NULL, NULL, "from '%s%s'",
                   sink_source->op, dt_iop_get_instance_id(sink_source));
+    dt_iop_raster_users_unlock(sink_source);
   }
   module->raster_mask.sink.source = NULL;
   module->raster_mask.sink.id = INVALID_MASKID;
@@ -2572,10 +2615,10 @@ static gboolean _presets_popup_callback(GtkButton *button,
   const gboolean disabled = !module->default_enabled && module->hide_enable_button;
   if(disabled) return FALSE;
 
-  GtkMenu *menu = dt_gui_presets_popup_menu_show_for_module(module);
+  dt_gui_presets_popup_menu_show_for_module(GTK_WIDGET(button), module);
 
-  dt_gui_menu_popup(menu,
-                    GTK_WIDGET(button), GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  // dt_gui_menu_popup(menu,
+  //                   GTK_WIDGET(button), GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
 
   return TRUE;
 }
@@ -2590,10 +2633,11 @@ static void _presets_popup_clicked(GtkGestureSingle *gesture,
   if(disabled) return;
 
   GtkWidget *button = dt_gui_get_widget(gesture);
-  GtkMenu *menu = dt_gui_presets_popup_menu_show_for_module(module);
+  // GtkMenu *menu = dt_gui_presets_popup_menu_show_for_module(module);
+  dt_gui_presets_popup_menu_show_for_module(button, module);
 
-  dt_gui_menu_popup(menu,
-                    button, GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
+  // dt_gui_menu_popup(menu,
+  //                   button, GDK_GRAVITY_SOUTH_EAST, GDK_GRAVITY_NORTH_EAST);
 }
 
 /* per-presets-button hysteresis state: a continuous trackpad gesture is a
@@ -3570,6 +3614,16 @@ void dt_iop_gui_set_expander(dt_iop_module_t *module)
       (module->multimenu_button,
        _("multiple instance actions\nright-click creates new instance"));
 
+  // popover menu for the multimenu_button
+  GSimpleActionGroup *instance_action_group = g_simple_action_group_new();
+  g_action_map_add_action_entries(G_ACTION_MAP(instance_action_group),
+                                  _instance_action_entries,
+                                  G_N_ELEMENTS(_instance_action_entries),
+                                  module);
+  gtk_widget_insert_action_group(module->multimenu_button,
+                                 "instances",
+                                 G_ACTION_GROUP(instance_action_group));
+
   if(!(module->flags() & IOP_FLAGS_ONE_INSTANCE))
     gtk_widget_set_tooltip_text(module->presets_button,
                                 _("presets\nright-click to apply on new instance"));
@@ -3864,6 +3918,7 @@ void dt_iop_update_multi_priority(dt_iop_module_t *module, const int new_priorit
   GHashTableIter iter;
   gpointer key, value;
 
+  dt_iop_raster_users_lock(module);
   g_hash_table_iter_init(&iter, module->raster_mask.source.users);
   while(g_hash_table_iter_next(&iter, &key, &value))
   {
@@ -3879,6 +3934,7 @@ void dt_iop_update_multi_priority(dt_iop_module_t *module, const int new_priorit
         hist->blend_params->raster_mask_instance = new_priority;
     }
   }
+  dt_iop_raster_users_unlock(module);
 
   module->multi_priority = new_priority;
 }
@@ -3911,30 +3967,27 @@ gboolean dt_iop_is_raster_mask_used(const dt_iop_module_t *module, const dt_mask
   GHashTableIter iter;
   gpointer key, value;
 
+  gboolean used = FALSE;
+  dt_iop_raster_users_lock(module);
   g_hash_table_iter_init(&iter, module->raster_mask.source.users);
-  while(g_hash_table_iter_next(&iter, &key, &value))
-  {
-    if(GPOINTER_TO_INT(value) == id)
-      return TRUE;
-  }
-  return FALSE;
+  while(!used && g_hash_table_iter_next(&iter, &key, &value))
+    used = GPOINTER_TO_INT(value) == id;
+  dt_iop_raster_users_unlock(module);
+  return used;
 }
 
-gboolean dt_iop_piece_is_raster_mask_used(const dt_dev_pixelpipe_iop_t *piece, const dt_mask_id_t id)
+/** checks if we should store the mask for export or use in subsequent modules.
+    The pipe->store_all_raster_masks is true if export has mask exporting so we
+    want the mask data.
+    This might be modifed if we don't want to include raster masks that are not
+    consumed by other modules.
+*/
+gboolean dt_iop_is_raster_mask_stored(const dt_dev_pixelpipe_iop_t *piece, const dt_mask_id_t id)
 {
   if(piece->pipe->store_all_raster_masks)
     return TRUE;
 
-  GHashTableIter iter;
-  gpointer key, value;
-
-  g_hash_table_iter_init(&iter, piece->module->raster_mask.source.users);
-  while(g_hash_table_iter_next(&iter, &key, &value))
-  {
-    if(GPOINTER_TO_INT(value) == id)
-      return TRUE;
-  }
-  return FALSE;
+  return dt_iop_is_raster_mask_used(piece->module, id);
 }
 
 void dt_iop_piece_set_raster(dt_dev_pixelpipe_iop_t *piece,
@@ -4289,14 +4342,13 @@ gboolean dt_iop_have_required_input_format(const int req_ch,
     // and set the module's trouble message
     if(module)
     {
-      dt_iop_set_module_trouble_message
-        (module, _("unsupported input"),
-         _("you have placed this module at\n"
+      dt_iop_set_module_trouble_message(module,
+        _("unsupported input"),
+        _("you have placed this module at\n"
            "a position in the pipeline where\n"
            "the data format does not match\n"
-           "its requirements."), NULL);
-      dt_print_pipe(DT_DEBUG_ALWAYS,
-        "unsupported data format", NULL, module, DT_DEVICE_NONE, roi_in, roi_out);
+           "its requirements."),
+        "unsupported data format");
     }
     else
     {
@@ -4332,6 +4384,16 @@ gboolean dt_iop_module_is_skipped(const dt_develop_t *dev,
       && dev->gui_module != module
       && (dev->gui_module->operation_tags_filter() & module->operation_tags())
       && (dev->gui_module->iop_order < module->iop_order);
+}
+
+gboolean dt_iop_module_modifies_roi_out(const dt_iop_module_t *module)
+{
+  return _iop_modify_roi_out != module->modify_roi_out;
+}
+
+gboolean dt_iop_module_modifies_roi_in(const dt_iop_module_t *module)
+{
+  return _iop_modify_roi_in != module->modify_roi_in;
 }
 
 enum
@@ -4377,17 +4439,17 @@ static float _action_process(gpointer target,
       _get_multi_show(module, &multi_show);
 
       if     (effect == DT_ACTION_EFFECT_NEW       && multi_show.new  )
-        _gui_copy_callback     (NULL, module);
+        _gui_copy_callback     (NULL, NULL, module);
       else if(effect == DT_ACTION_EFFECT_DUPLICATE && multi_show.new  )
-        _gui_duplicate_callback(NULL, module);
+        _gui_duplicate_callback(NULL, NULL, module);
       else if(effect == DT_ACTION_EFFECT_UP        && multi_show.up   )
-        _gui_moveup_callback   (NULL, module);
+        _gui_moveup_callback   (NULL, NULL, module);
       else if(effect == DT_ACTION_EFFECT_DOWN      && multi_show.down )
-        _gui_movedown_callback (NULL, module);
+        _gui_movedown_callback (NULL, NULL, module);
       else if(effect == DT_ACTION_EFFECT_DELETE    && multi_show.close)
-        _gui_delete_callback   (NULL, module);
+        _gui_delete_callback   (NULL, NULL, module);
       else if(effect == DT_ACTION_EFFECT_RENAME                               )
-        _gui_rename_callback   (NULL, module);
+        _gui_rename_callback   (NULL, NULL, module);
       else _gui_multiinstance_callback(NULL, module);
       break;
     case DT_ACTION_ELEMENT_RESET:

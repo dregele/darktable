@@ -18,6 +18,7 @@
 
 #include "common/darktable.h"
 #include "common/file_location.h"
+#include "mcp/dt_bridge.h"
 #include "mcp/mcp_jsonrpc.h"
 #include "mcp/mcp_tools.h"
 
@@ -67,16 +68,30 @@ int main(int argc, char **argv)
   const int n_core = argc - core_start;
   char **core = (n_core > 0) ? &argv[core_start] : NULL;
 
-  // build the synthetic argv, injecting defaults only when the user did not
-  // supply them: a throwaway in-memory library and no sidecar writes
+  // --read-only is ours, and everything past --core goes to dt_init, which
+  // answers an option it does not know with its whole usage text
+  if(_has_flag(core, n_core, "--read-only"))
+  {
+    fprintf(stderr, "darktable-mcp: --read-only belongs before --core;"
+                    " usage: darktable-mcp [--read-only]"
+                    " [--core <darktable options>]\n");
+    return 1;
+  }
+  const gboolean read_only = _has_flag(argv, core_start, "--read-only");
+
+  // inject defaults only when the user named neither: both mean "touch
+  // nothing". naming a real library opts into persistence, so their own
+  // preference applies there
   GPtrArray *m = g_ptr_array_new();
   g_ptr_array_add(m, (gpointer)"darktable-mcp");
-  if(!_has_flag(core, n_core, "--library"))
+  const gboolean adhoc = !_has_flag(core, n_core, "--library")
+                      && !_has_flag(core, n_core, "--configdir");
+  if(adhoc)
   {
     g_ptr_array_add(m, (gpointer)"--library");
     g_ptr_array_add(m, (gpointer)":memory:");
   }
-  if(!_has_conf(core, n_core, "write_sidecar_files="))
+  if(adhoc && !_has_conf(core, n_core, "write_sidecar_files="))
   {
     g_ptr_array_add(m, (gpointer)"--conf");
     g_ptr_array_add(m, (gpointer)"write_sidecar_files=never");
@@ -102,7 +117,11 @@ int main(int argc, char **argv)
   // tool descriptions and schemas live in the data folder, editable without a rebuild
   char datadir[PATH_MAX] = { 0 };
   dt_loc_get_datadir(datadir, sizeof(datadir));
-  gchar *tools_file = g_build_filename(datadir, "mcp-tools.json", NULL);
+  // refuse anything that would change the library; the other valve, an
+  // in-memory catalog, also costs access to the user's images
+  dt_bridge_set_read_only(read_only);
+
+  gchar *tools_file = g_build_filename(datadir, "mcp_tools.json", NULL);
   if(mcp_tools_load(tools_file) < 0)
     fprintf(stderr, "darktable-mcp: no tools available (could not load '%s')\n",
             tools_file);

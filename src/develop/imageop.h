@@ -241,6 +241,8 @@ typedef struct dt_iop_module_t
           dt_iop_module_t* -> id
       */
       GHashTable *users;
+      /** guards users, see dt_iop_raster_users_lock() */
+      dt_pthread_mutex_t users_lock;
       /** the masks this module has to offer. maps id -> name */
       GHashTable *masks;
     } source;
@@ -471,6 +473,10 @@ static inline gboolean dt_iop_module_is_finalscale(const dt_iop_module_t *module
   return dt_iop_module_is(module, "finalscale");
 }
 
+/** helpers providing info about specified module roi modify functions */
+gboolean dt_iop_module_modifies_roi_out(const dt_iop_module_t *module);
+gboolean dt_iop_module_modifies_roi_in(const dt_iop_module_t *module);
+
 /** count instances of a module **/
 int dt_iop_count_instances(dt_iop_module_so_t *module);
 /** return preferred module instance for shortcuts **/
@@ -504,10 +510,22 @@ void dt_iop_update_multi_name(dt_iop_module_t *module,
                               const gboolean enable,
                               const gboolean force);
 
+/** guard module->raster_mask.source.users: pipes read it while another pipe's
+    history replay rewrites it. Recursive */
+static inline void dt_iop_raster_users_lock(const dt_iop_module_t *const module)
+  ACQUIRE(&module->raster_mask.source.users_lock)
+{
+  dt_pthread_mutex_lock((dt_pthread_mutex_t *)&module->raster_mask.source.users_lock);
+}
+static inline void dt_iop_raster_users_unlock(const dt_iop_module_t *const module)
+  RELEASE(&module->raster_mask.source.users_lock)
+{
+  dt_pthread_mutex_unlock((dt_pthread_mutex_t *)&module->raster_mask.source.users_lock);
+}
 /** iterates over the users hash table and checks if a specific mask is being used */
 gboolean dt_iop_is_raster_mask_used(const dt_iop_module_t *module, const dt_mask_id_t id);
 /** checks dt_iop_is_raster_mask_used() or writing for exports */
-gboolean dt_iop_piece_is_raster_mask_used(const struct dt_dev_pixelpipe_iop_t *piece,
+gboolean dt_iop_is_raster_mask_stored(const struct dt_dev_pixelpipe_iop_t *piece,
                                           const dt_mask_id_t id);
 
 /** set and clear the rastermasks, check the pixelpipe cache and report */
@@ -555,6 +573,8 @@ void dt_iop_set_module_trouble_message(dt_iop_module_t *module,
                                        const char *const trouble_msg,
                                        const char *const trouble_tooltip,
                                        const char *stderr_message);
+// clear the trouble message
+void dt_iop_clear_module_trouble_message(dt_iop_module_t *const module);
 
 // format modules description going in tooltips
 const char **dt_iop_set_description(dt_iop_module_t *module,

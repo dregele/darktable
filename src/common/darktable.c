@@ -129,6 +129,48 @@
 
 darktable_t darktable;
 
+#ifdef _WIN32
+static gboolean _console_notice_requested = FALSE;
+
+void dt_request_console_notice(void)
+{
+  _console_notice_requested = TRUE;
+}
+
+static void _show_console_notice(void)
+{
+  const char *notice = _("this console window is required by darktable on this "
+                         "version of Windows.\n"
+                         "on Windows 11 24H2 and later, darktable normally runs "
+                         "without this window.\n"
+                         "do not close it or press ctrl+c while darktable is running.\n"
+                         "it will close automatically when darktable exits.\n"
+                         "\n"
+                         "to hide this window anyway, follow the instructions at:\n"
+                         "https://www.darktable.org/about/faq/#faq-windows-terminal\n");
+  gchar **notice_lines = g_strsplit(notice, "\n", -1);
+  gchar *console_notice = g_strjoinv("\r\n", notice_lines);
+  g_strfreev(notice_lines);
+
+  glong length = 0;
+  gunichar2 *wide_notice = g_utf8_to_utf16(console_notice, -1, NULL, &length, NULL);
+  g_free(console_notice);
+  if(!wide_notice) return;
+
+  const HANDLE output = CreateFileW(L"CONOUT$", GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                    OPEN_EXISTING, 0, NULL);
+  if(output != INVALID_HANDLE_VALUE)
+  {
+    DWORD written;
+    WriteConsoleW(output, wide_notice, (DWORD)length, &written, NULL);
+    CloseHandle(output);
+  }
+
+  g_free(wide_notice);
+}
+#endif
+
 static int usage(const char *argv0)
 {
 #ifdef _WIN32
@@ -824,6 +866,25 @@ static char *_get_version_string(void)
   #endif
 #endif
 
+#if (defined(__amd64__) || defined(__amd64) || defined(__x86_64__) || defined(__x86_64))
+  #if !defined(__SSE2__) || !defined(__SSE__)
+    const char *platform_name = "x64";
+  #else
+    const char *platform_name = "x64 sse2";
+  #endif
+#else
+  #if defined(__aarch64__) && (defined(__ARM_64BIT_STATE) && defined(__ARM_ARCH) && (defined(__ARM_ARCH_8A) || __ARM_ARCH_PROFILE == 'A') || defined(__APPLE__) || defined(__MINGW64__))
+    #if defined(__ARM_NEON)
+      const char *platform_name = "arm neon";
+    #else
+      const char *platform_name = "arm";
+    #endif
+  #else
+    const char *platform_name = "other";
+  #endif
+#endif
+
+
 #ifdef USE_LUA
   const char *lua_api_version = strcmp(LUA_API_VERSION_SUFFIX, "") ?
                                        STR(LUA_API_VERSION_MAJOR) "."
@@ -836,17 +897,16 @@ static char *_get_version_string(void)
 #endif
 
 char *version = g_strdup_printf(
-               "darktable %s [%s]\n"
+               "darktable %s [%s %s]\n"
                "Copyright (C) 2012-%s Johannes Hanika and other contributors.\n\n"
                "Compile options:\n"
-               "  Bit depth              -> %zu bit\n"
                "%s%s%s%s%s%s%s%s%s\n"
                "See %s for detailed documentation.\n"
                "See %s to report bugs.\n",
                darktable_package_version,
                system_name,
+               platform_name,
                darktable_last_commit_year,
-               CHAR_BIT * sizeof(void *),
 
                "  Exiv2                  -> ", exiv2_version,
                "  Lensfun                -> ", liblensfun_version,
@@ -854,12 +914,6 @@ char *version = g_strdup_printf(
                "  Debug                  -> ENABLED\n"
 #else
                "  Debug                  -> DISABLED\n"
-#endif
-
-#if defined(__SSE2__) && defined(__SSE__)
-               "  SSE2 optimizations     -> ENABLED\n"
-#else
-               "  SSE2 optimizations     -> DISABLED\n"
 #endif
 
 #ifdef _OPENMP
@@ -982,8 +1036,6 @@ int dt_init(int argc,
             const gboolean load_data,
             lua_State *L)
 {
-  const double start_wtime = dt_get_wtime();
-
 #ifndef _WIN32
   if(getuid() == 0 || geteuid() == 0)
     dt_print(DT_DEBUG_ALWAYS,
@@ -1007,7 +1059,7 @@ int dt_init(int argc,
   // init all pointers to 0:
   memset(&darktable, 0, sizeof(darktable_t));
 
-  darktable.start_wtime = start_wtime;
+  darktable.start_mtime = g_get_monotonic_time();
 
   darktable.progname = argv[0];
 
@@ -1696,6 +1748,14 @@ int dt_init(int argc,
   // set the interface language and prepare selection for prefs & confgen
   darktable.l10n = dt_l10n_init(init_gui);
 
+#ifdef _WIN32
+  if(_console_notice_requested)
+  {
+    _console_notice_requested = FALSE;
+    _show_console_notice();
+  }
+#endif
+
   gboolean has_workspace = FALSE;
 
   // we need this REALLY early so that error messages can be shown,
@@ -2071,7 +2131,7 @@ int dt_init(int argc,
   }
 
   dt_splash_screen_set_progress(_("loading image formats"));
- 
+
   darktable.imageio = (dt_imageio_t *)calloc(1, sizeof(dt_imageio_t));
   dt_imageio_init(darktable.imageio);
 
@@ -2223,7 +2283,7 @@ int dt_init(int argc,
 #endif
 
   dt_print(DT_DEBUG_CONTROL,
-           "[dt_init] startup took %f seconds", dt_get_wtime() - start_wtime);
+           "[dt_init] startup took %f seconds", dt_get_wtime());
 
   dt_print_mem_usage("after successful startup");
 
@@ -2475,7 +2535,7 @@ void dt_print_ext(const char *msg, ...)
   vsnprintf(vbuf, sizeof(vbuf), msg, ap);
   va_end(ap);
 
-  printf("%11.4f %s\n", dt_get_wtime() - darktable.start_wtime, vbuf);
+  printf("%11.4f %s\n", dt_get_wtime(), vbuf);
   fflush(stdout);
 }
 

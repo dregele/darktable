@@ -1206,8 +1206,12 @@ static void _declare_cat_on_pipe(dt_iop_module_t *self, const gboolean preset)
   }
 
   if(origcat != chr->adaptation)
-    dt_print(DT_DEBUG_PIPE, "changed CAT for %s%s from %p to %p",
-      self->op, dt_iop_get_instance_id(self), origcat, chr->adaptation);
+    dt_print(DT_DEBUG_PIPE, "changed CAT for %s%s from %s%s to %s%s",
+      self->op, dt_iop_get_instance_id(self),
+      origcat ? origcat->name() : "none",
+      origcat ? dt_iop_get_instance_id(origcat) : "",
+      chr->adaptation ? chr->adaptation->op : "none",
+      chr->adaptation ? dt_iop_get_instance_id(chr->adaptation) : "");
 }
 
 static void _update_illuminants(const dt_iop_module_t *self);
@@ -1993,14 +1997,14 @@ static void _set_trouble_messages(dt_iop_module_t *self)
   if(!chr->temperature)
   {
     if(chr->adaptation)
-      dt_iop_set_module_trouble_message(chr->adaptation, NULL, NULL, NULL);
+      dt_iop_clear_module_trouble_message(chr->adaptation);
     return;
   }
 
   if(!chr->adaptation)
   {
-    dt_iop_set_module_trouble_message(chr->temperature, NULL, NULL, NULL);
-    dt_iop_set_module_trouble_message(self, NULL, NULL, NULL);
+    dt_iop_clear_module_trouble_message(chr->temperature);
+    dt_iop_clear_module_trouble_message(self);
     return;
   }
 
@@ -2034,21 +2038,9 @@ static void _set_trouble_messages(dt_iop_module_t *self)
                             && !temperature_enabled
                             && chr->temperature->default_enabled;
 
-  if(problem1 || problem2 || problem3)
-    dt_print_pipe(DT_DEBUG_PIPE, "chroma trouble", NULL, self, DT_DEVICE_NONE, NULL, NULL,
-      "%s%s%sD65=%s.  D65 %.3f %.3f %.3f, AS-SHOT %.3f %.3f %.3f ID=%i",
-      problem1 ? "white balance applied twice, " : "",
-      problem2 ? "double CAT applied, " : "",
-      problem3 ? "white balance missing, " : "",
-      STR_YESNO(_dev_is_D65_chroma(dev)),
-      chr->D65coeffs[0], chr->D65coeffs[1], chr->D65coeffs[2],
-      chr->as_shot[0], chr->as_shot[1], chr->as_shot[2],
-      dev->image_storage.id);
-
   if(problem2)
   {
-    dt_iop_set_module_trouble_message
-      (self,
+    dt_iop_set_module_trouble_message(self,
         _("double CAT applied"),
         _("you have 2 instances or more of color calibration,\n"
           "all providing chromatic adaptation.\n"
@@ -2060,8 +2052,7 @@ static void _set_trouble_messages(dt_iop_module_t *self)
 
   if(problem1)
   {
-    dt_iop_set_module_trouble_message
-      (chr->temperature,
+    dt_iop_set_module_trouble_message(chr->temperature,
         _("white balance applied twice (<u>details</u>)"),
         _("the color calibration module is enabled and already provides\n"
           "chromatic adaptation.\n"
@@ -2069,8 +2060,7 @@ static void _set_trouble_messages(dt_iop_module_t *self)
           "or disable chromatic adaptation in color calibration."),
         NULL);
 
-    dt_iop_set_module_trouble_message
-      (self,
+    dt_iop_set_module_trouble_message(self,
         _("white balance module error (<u>details</u>)"),
         _("the white balance module is not using the camera\n"
           "reference illuminant, which will cause issues here\n"
@@ -2082,8 +2072,7 @@ static void _set_trouble_messages(dt_iop_module_t *self)
 
   if(problem3)
   {
-    dt_iop_set_module_trouble_message
-      (chr->temperature,
+    dt_iop_set_module_trouble_message(chr->temperature,
         _("white balance missing (<u>details</u>)"),
         _("this module is not providing a valid reference illuminant\n"
           "causing chromatic adaptation issues in color calibration.\n"
@@ -2091,8 +2080,7 @@ static void _set_trouble_messages(dt_iop_module_t *self)
           "or disable chromatic adaptation in color calibration."),
         NULL);
 
-    dt_iop_set_module_trouble_message
-      (self,
+    dt_iop_set_module_trouble_message(self,
         _("white balance missing (<u>details</u>)"),
         _("the white balance module is not providing a valid reference\n"
           "illuminant causing issues with chromatic adaptation here.\n"
@@ -2104,8 +2092,8 @@ static void _set_trouble_messages(dt_iop_module_t *self)
 
   if(chr->adaptation && chr->adaptation == self)
   {
-    dt_iop_set_module_trouble_message(chr->temperature, NULL, NULL, NULL);
-    dt_iop_set_module_trouble_message(self, NULL, NULL, NULL);
+    dt_iop_clear_module_trouble_message(chr->temperature);
+    dt_iop_clear_module_trouble_message(self);
   }
 }
 
@@ -3813,7 +3801,11 @@ void gui_update(dt_iop_module_t *self)
 
   dt_iop_gui_enter_critical_section(self);
 
-  const int i = dt_conf_get_int("darkroom/modules/channelmixerrgb/colorchecker");
+  // an older darktablerc can point past the end of the list. Without the
+  // clamp, the combobox would show its last entry but dt_get_color_checker()
+  // would fall back to the X-Rite 24
+  const int i = MIN(dt_conf_get_int("darkroom/modules/channelmixerrgb/colorchecker"),
+                    COLOR_CHECKER_LAST - 1);
   dt_bauhaus_combobox_set(g->checkers_list, i);
   g->checker = dt_get_color_checker(i);
 
@@ -4139,6 +4131,7 @@ void gui_changed(dt_iop_module_t *self,
 
   // If "as shot in camera" illuminant is used, CAT space is forced automatically
   // therefore, make the control insensitive
+  dt_bauhaus_combobox_set_from_value(g->adaptation, p->adaptation);
   gtk_widget_set_sensitive(g->adaptation, p->illuminant != DT_ILLUMINANT_CAMERA);
 
   _declare_cat_on_pipe(self, FALSE);
@@ -4673,10 +4666,8 @@ void gui_init(dt_iop_module_t *self)
      0, _checker_changed_callback, self,
      N_("Xrite ColorChecker 24 pre-2014"),
      N_("Xrite/Calibrite ColorChecker 24 post-2014"),
-     N_("Datacolor SpyderCheckr 24 pre-2018"),
-     N_("Datacolor SpyderCheckr 24 post-2018"),
-     N_("Datacolor SpyderCheckr 48 pre-2018"),
-     N_("Datacolor SpyderCheckr 48 post-2018"),
+     N_("Datacolor SpyderCheckr 24"),
+     N_("Datacolor SpyderCheckr 48"),
      N_("Datacolor SpyderCheckr Photo"));
 
   DT_BAUHAUS_COMBOBOX_NEW_FULL

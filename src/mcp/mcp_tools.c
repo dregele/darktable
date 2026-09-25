@@ -59,6 +59,13 @@ static int _arg_int(JsonObject *args, const char *key, int fallback)
   return (int)json_object_get_int_member(args, key);
 }
 
+static JsonArray *_arg_array(JsonObject *args, const char *key)
+{
+  if(!args || !json_object_has_member(args, key)) return NULL;
+  JsonNode *n = json_object_get_member(args, key);
+  return JSON_NODE_HOLDS_ARRAY(n) ? json_node_get_array(n) : NULL;
+}
+
 static gboolean _arg_bool(JsonObject *args, const char *key, gboolean fallback)
 {
   if(!args || !json_object_has_member(args, key)) return fallback;
@@ -87,25 +94,28 @@ static JsonNode *_image_result(const uint8_t *png, size_t len)
   return node;
 }
 
+// input:{path|imgid}, shared by everything that names one image
+static void _parse_image_input(JsonObject *args, const char **path, int *imgid)
+{
+  *path = NULL; *imgid = 0;
+  if(!args || !json_object_has_member(args, "input")) return;
+  JsonNode *in = json_object_get_member(args, "input");
+  if(!JSON_NODE_HOLDS_OBJECT(in)) return;
+  JsonObject *io = json_node_get_object(in);
+  if(json_object_has_member(io, "path"))
+    *path = json_object_get_string_member(io, "path");
+  if(json_object_has_member(io, "imgid"))
+    *imgid = (int)json_object_get_int_member(io, "imgid");
+}
+
 // shared parsing of the render/image_stats input arguments
 static gboolean _parse_render_inputs(JsonObject *args, const char **path,
                                      int *imgid, int *w, int *h, int *he,
                                      gboolean *dtm, JsonArray **stack)
 {
-  *path = NULL; *imgid = 0; *stack = NULL;
+  *stack = NULL;
+  _parse_image_input(args, path, imgid);
   if(!args) return FALSE;
-  if(json_object_has_member(args, "input"))
-  {
-    JsonNode *in = json_object_get_member(args, "input");
-    if(JSON_NODE_HOLDS_OBJECT(in))
-    {
-      JsonObject *io = json_node_get_object(in);
-      if(json_object_has_member(io, "path"))
-        *path = json_object_get_string_member(io, "path");
-      if(json_object_has_member(io, "imgid"))
-        *imgid = (int)json_object_get_int_member(io, "imgid");
-    }
-  }
   *w = _arg_int(args, "width", 0);
   *h = _arg_int(args, "height", 0);
   *he = _arg_int(args, "history_end", -1);
@@ -246,7 +256,15 @@ static JsonNode *_json_text_or_err(char *json, char *err)
 
 static JsonNode *_tool_list_images(JsonObject *args)
 {
-  return _json_text_or_err(dt_bridge_list_images_json(_arg_int(args, "limit", 0)), NULL);
+  char *err = NULL;
+  // sequenced: reading err in the same argument list would be unordered
+  char *json = dt_bridge_list_images_json(_arg_int(args, "limit", 0),
+                                          _arg_string(args, "folder"),
+                                          _arg_int(args, "rating", -1),
+                                          _arg_string(args, "color"),
+                                          _arg_bool(args, "rejected", FALSE),
+                                          _arg_int(args, "film_roll", 0), &err);
+  return _json_text_or_err(json, err);
 }
 
 static JsonNode *_tool_get_history(JsonObject *args)
@@ -254,14 +272,15 @@ static JsonNode *_tool_get_history(JsonObject *args)
   if(!args || !json_object_has_member(args, "imgid"))
     return _text_result("get_history: requires integer 'imgid'", TRUE);
   char *err = NULL;
-  return _json_text_or_err(dt_bridge_get_history_json(_arg_int(args, "imgid", 0), &err),
-                           err);
+  char *json = dt_bridge_get_history_json(_arg_int(args, "imgid", 0), &err);
+  return _json_text_or_err(json, err);
 }
 
 static JsonNode *_tool_list_styles(JsonObject *args)
 {
-  (void)args;
-  return _json_text_or_err(dt_bridge_list_styles_json(), NULL);
+  return _json_text_or_err(dt_bridge_list_styles_json(_arg_string(args, "filter"),
+                                                      _arg_int(args, "limit", 0)),
+                           NULL);
 }
 
 static JsonNode *_tool_apply_style(JsonObject *args)
@@ -269,7 +288,8 @@ static JsonNode *_tool_apply_style(JsonObject *args)
   const char *name = _arg_string(args, "name");
   const int imgid = _arg_int(args, "imgid", 0);
   char *err = NULL;
-  if(!dt_bridge_apply_style(name, imgid, _arg_bool(args, "overwrite", FALSE), &err))
+  if(!dt_bridge_apply_style(name, imgid, _arg_bool(args, "overwrite", FALSE),
+                            _arg_array(args, "imgids"), &err))
   { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
   return _text_result("{\"ok\":true}", FALSE);
 }
@@ -283,6 +303,78 @@ static JsonNode *_tool_save_style(JsonObject *args)
   return _text_result("{\"ok\":true}", FALSE);
 }
 
+static JsonNode *_tool_set_rating(JsonObject *args)
+{
+  char *err = NULL;
+  if(!dt_bridge_set_rating(_arg_array(args, "imgids"),
+                           _arg_int(args, "rating", -1),
+                           _arg_bool(args, "reject", FALSE), &err))
+  { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
+  return _text_result("{\"ok\":true}", FALSE);
+}
+
+static JsonNode *_tool_set_color_label(JsonObject *args)
+{
+  char *err = NULL;
+  if(!dt_bridge_set_color_label(_arg_array(args, "imgids"),
+                                _arg_string(args, "color"),
+                                _arg_bool(args, "toggle", FALSE), &err))
+  { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
+  return _text_result("{\"ok\":true}", FALSE);
+}
+
+static JsonNode *_tool_import_images(JsonObject *args)
+{
+  char *err = NULL;
+  char *json = dt_bridge_import_images_json(_arg_array(args, "paths"),
+                                            _arg_string(args, "folder"),
+                                            _arg_bool(args, "recursive", FALSE), &err);
+  return _json_text_or_err(json, err);
+}
+
+static JsonNode *_tool_list_film_rolls(JsonObject *args)
+{
+  return _json_text_or_err(dt_bridge_list_film_rolls_json(), NULL);
+}
+
+static JsonNode *_tool_get_metadata(JsonObject *args)
+{
+  char *err = NULL;
+  char *json = dt_bridge_get_metadata_json(_arg_int(args, "imgid", 0), &err);
+  if(!json)
+  { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
+  JsonNode *r = _text_result(json, FALSE);
+  g_free(json);
+  return r;
+}
+
+static JsonNode *_tool_get_conf(JsonObject *args)
+{
+  char *err = NULL;
+  char *json = dt_bridge_get_conf_json(_arg_string(args, "key"), &err);
+  if(!json)
+  { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
+  JsonNode *r = _text_result(json, FALSE);
+  g_free(json);
+  return r;
+}
+
+static JsonNode *_tool_list_conf(JsonObject *args)
+{
+  char *json = dt_bridge_list_conf_json(_arg_string(args, "prefix"));
+  JsonNode *r = _text_result(json ? json : "[]", FALSE);
+  g_free(json);
+  return r;
+}
+
+static JsonNode *_tool_reset_history(JsonObject *args)
+{
+  char *err = NULL;
+  if(!dt_bridge_reset_history(_arg_int(args, "imgid", 0), &err))
+  { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
+  return _text_result("{\"ok\":true}", FALSE);
+}
+
 static JsonNode *_tool_import_style(JsonObject *args)
 {
   char *err = NULL;
@@ -291,17 +383,110 @@ static JsonNode *_tool_import_style(JsonObject *args)
   return _text_result("{\"ok\":true}", FALSE);
 }
 
-static JsonNode *_tool_export(JsonObject *args)
+static JsonNode *_tool_export_images(JsonObject *args)
 {
-  const char *path; int imgid, w, h, he; gboolean dtm; JsonArray *stack;
-  _parse_render_inputs(args, &path, &imgid, &w, &h, &he, &dtm, &stack);
+  // deliberately not _parse_render_inputs: an export must not carry a stack or
+  // the tone-mapper switch, both of which are committed to the image's history
+  const char *path = NULL;
+  int imgid = 0;
+  _parse_image_input(args, &path, &imgid);
+  const int w = _arg_int(args, "width", 0);
+  const int h = _arg_int(args, "height", 0);
+  const int he = _arg_int(args, "history_end", -1);
+  // export never edits, so a client sending these should be told rather than
+  // have them quietly dropped
+  if(args && (json_object_has_member(args, "stack")
+              || json_object_has_member(args, "disable_tone_mappers")))
+    return _text_result("export_images: 'stack' and 'disable_tone_mappers' are"
+                        " edits and belong to render; export writes the image"
+                        " as it already is", TRUE);
+
   const char *out_path = _arg_string(args, "out_path");
-  if((!path && imgid <= 0) || !out_path)
-    return _text_result("export: requires input.path/imgid and 'out_path'", TRUE);
+  const char *out_dir = _arg_string(args, "out_dir");
+  JsonArray *ids = _arg_array(args, "imgids");
+  const gboolean batch = ids && json_array_get_length(ids) > 0;
+  if(!batch && !path && imgid <= 0)
+    return _text_result("export_images: requires input.path/imgid, or 'imgids'",
+                        TRUE);
   char *err = NULL;
-  if(!dt_bridge_export_png(path, imgid, w, h, stack, dtm, he, out_path, &err))
-  { JsonNode *r = _text_result(err ? err : "error", TRUE); g_free(err); return r; }
-  char *msg = g_strdup_printf("{\"ok\":true,\"out_path\":\"%s\"}", out_path);
+  GPtrArray *written = g_ptr_array_new_with_free_func(g_free);
+  GPtrArray *skipped = g_ptr_array_new_with_free_func(g_free);
+  if(!dt_bridge_export_images(path, imgid, w, h, he, out_path,
+                              ids, out_dir, _arg_string(args, "format"),
+                              _arg_int(args, "quality", 0),
+                              _arg_bool(args, "upscale", FALSE),
+                              _arg_bool(args, "high_quality", FALSE),
+                              written, skipped, &err))
+  {
+    // a batch that failed part way still put files on disk; discarding the list
+    // would leave the caller unable to see them, and a retry would duplicate
+    GString *m = g_string_new(err ? err : "error");
+    if(written->len)
+    {
+      g_string_append_printf(m, " (%u already written:", written->len);
+      for(guint i = 0; i < written->len; i++)
+        g_string_append_printf(m, "%s %s", i ? "," : "",
+                               (const char *)g_ptr_array_index(written, i));
+      g_string_append_c(m, ')');
+    }
+    // and the ones the policy left alone: without them a retry cannot tell a
+    // file that was deliberately kept from one the batch never reached
+    if(skipped->len)
+    {
+      g_string_append_printf(m, " (%u skipped, already on disk with"
+                                " plugins/imageio/storage/disk/overwrite set"
+                                " to skip:", skipped->len);
+      for(guint i = 0; i < skipped->len; i++)
+        g_string_append_printf(m, "%s %s", i ? "," : "",
+                               (const char *)g_ptr_array_index(skipped, i));
+      g_string_append_c(m, ')');
+    }
+    JsonNode *r = _text_result(m->str, TRUE);
+    g_string_free(m, TRUE);
+    g_ptr_array_free(written, TRUE);
+    g_ptr_array_free(skipped, TRUE);
+    g_free(err);
+    return r;
+  }
+
+  // report where the files actually landed: with no out_path/out_dir the
+  // target comes from darktable's own export setting, which the caller cannot
+  // work out from the request
+  JsonArray *paths = json_array_new();
+  for(guint i = 0; i < written->len; i++)
+    json_array_add_string_element(paths, g_ptr_array_index(written, i));
+
+  JsonObject *o = json_object_new();
+  json_object_set_boolean_member(o, "ok", TRUE);
+  json_object_set_int_member(o, "exported", written->len);
+  json_object_set_array_member(o, "paths", paths);
+
+  // an export that wrote nothing because every target was already there looks
+  // exactly like one that succeeded, so name the files and say why
+  json_object_set_int_member(o, "skipped", skipped->len);
+  if(skipped->len)
+  {
+    JsonArray *sp = json_array_new();
+    for(guint i = 0; i < skipped->len; i++)
+      json_array_add_string_element(sp, g_ptr_array_index(skipped, i));
+    json_object_set_array_member(o, "skipped_paths", sp);
+    json_object_set_string_member(o, "skipped_reason",
+                                  "the file already exists and"
+                                  " plugins/imageio/storage/disk/overwrite is"
+                                  " set to skip; set it to 0 to pick a free"
+                                  " name, or 1 to overwrite");
+  }
+
+  JsonNode *root = json_node_new(JSON_NODE_OBJECT);
+  json_node_take_object(root, o);
+  JsonGenerator *g = json_generator_new();
+  json_generator_set_root(g, root);
+  char *msg = json_generator_to_data(g, NULL);
+  g_object_unref(g);
+  json_node_unref(root);
+  g_ptr_array_free(written, TRUE);
+  g_ptr_array_free(skipped, TRUE);
+
   JsonNode *r = _text_result(msg, FALSE);
   g_free(msg);
   return r;
@@ -320,25 +505,33 @@ typedef struct mcp_handler_t
 } mcp_handler_t;
 
 // tool behaviour lives in C; the presentation (name/description/inputSchema)
-// is loaded from mcp-tools.json in the data folder and matched here by name
+// is loaded from mcp_tools.json in the data folder and matched here by name
 static const mcp_handler_t _handlers[] = {
-  { "list_modules",  _tool_list_modules },
-  { "module_schema", _tool_module_schema },
-  { "decode_params", _tool_decode_params },
-  { "encode_params", _tool_encode_params },
-  { "render",        _tool_render },
-  { "image_stats",   _tool_image_stats },
-  { "list_images",   _tool_list_images },
-  { "get_history",   _tool_get_history },
-  { "list_styles",   _tool_list_styles },
-  { "apply_style",   _tool_apply_style },
-  { "save_style",    _tool_save_style },
-  { "import_style",  _tool_import_style },
-  { "export",        _tool_export },
+  { "list_modules",     _tool_list_modules },
+  { "module_schema",    _tool_module_schema },
+  { "decode_params",    _tool_decode_params },
+  { "encode_params",    _tool_encode_params },
+  { "render",           _tool_render },
+  { "image_stats",      _tool_image_stats },
+  { "list_images",      _tool_list_images },
+  { "get_history",      _tool_get_history },
+  { "list_styles",      _tool_list_styles },
+  { "apply_style",      _tool_apply_style },
+  { "save_style",       _tool_save_style },
+  { "import_style",     _tool_import_style },
+  { "reset_history",    _tool_reset_history },
+  { "list_film_rolls",  _tool_list_film_rolls },
+  { "import_images",    _tool_import_images },
+  { "set_rating",       _tool_set_rating },
+  { "set_color_label",  _tool_set_color_label },
+  { "get_metadata",     _tool_get_metadata },
+  { "get_conf",         _tool_get_conf },
+  { "list_conf",        _tool_list_conf },
+  { "export_images",    _tool_export_images },
 };
 static const size_t _n_handlers = sizeof(_handlers) / sizeof(_handlers[0]);
 
-// tool metadata array (name/description/inputSchema) loaded from mcp-tools.json
+// tool metadata array (name/description/inputSchema) loaded from mcp_tools.json
 static JsonNode *_tools_meta = NULL;
 
 int mcp_tools_load(const char *path)

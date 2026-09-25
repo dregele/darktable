@@ -3123,7 +3123,9 @@ static gboolean _draw_retrieve_lines_from_params(dt_iop_module_t *self,
     }
   }
 
-  if(method == ASHIFT_METHOD_LINES && p->last_drawn_lines_count > 0)
+  // the stored count indexes the fixed saved-lines array
+  if(method == ASHIFT_METHOD_LINES && p->last_drawn_lines_count > 0
+     && p->last_drawn_lines_count <= MAX_SAVED_LINES)
   {
     float pts[MAX_SAVED_LINES * 4] = { 0.0f };
 
@@ -5506,7 +5508,7 @@ static void _event_structure_auto_clicked(GtkGestureSingle *gesture,
     {
       _gui_update_structure_states(self, widget);
       dt_control_queue_redraw_center();
-    
+      return;
     }
     else
     {
@@ -5559,6 +5561,17 @@ static void _event_process_after_preview_callback(gpointer instance, dt_iop_modu
   switch(jobcode)
   {
     case ASHIFT_JOBCODE_DO_CROP:
+      // the signal can come from a preview run that started before the
+      // module was enabled and so never filled g->buf; do_crop() would
+      // return without cropping, so keep the request for the next run
+      dt_iop_gui_enter_critical_section(self);
+      const gboolean buf_empty = g->buf_width == 0 || g->buf_height == 0;
+      dt_iop_gui_leave_critical_section(self);
+      if(buf_empty)
+      {
+        g->jobcode = ASHIFT_JOBCODE_DO_CROP;
+        break;
+      }
       do_crop(self, p);
       _commit_crop_box(p, g);
       // save all that
@@ -5921,6 +5934,21 @@ static void _event_structure_lines_clicked(GtkGestureSingle *gesture,
 
 }
 
+// the structure buttons implement radio-button behavior by managing all
+// toggle states themselves, so keep GTK from flipping the button on release:
+// claim the sequence in CAPTURE phase (same pattern as dt_iop_togglebutton_new)
+// and the button's own bubble-phase gesture never emits "clicked"
+static GtkGestureSingle *_connect_structure_button(GtkWidget *widget,
+                                                   GCallback pressed,
+                                                   dt_iop_module_t *self)
+{
+  GtkGestureSingle *gesture = dt_gui_connect_click(widget, pressed, NULL, self);
+  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(gesture),
+                                             GTK_PHASE_CAPTURE);
+  g_signal_connect(G_OBJECT(gesture), "begin", G_CALLBACK(dt_gui_gesture_claim), NULL);
+  return gesture;
+}
+
 void gui_init(dt_iop_module_t *self)
 {
   dt_iop_ashift_gui_data_t *g = IOP_GUI_ALLOC(ashift);
@@ -6127,11 +6155,11 @@ void gui_init(dt_iop_module_t *self)
   g_object_set_data(G_OBJECT(g->fit_both), DT_ACTION_GESTURE_KEY,
                     dt_gui_connect_click(g->fit_both, _event_fit_both_button_clicked, NULL, self));
   g_object_set_data(G_OBJECT(g->structure_quad), DT_ACTION_GESTURE_KEY,
-                    dt_gui_connect_click(g->structure_quad, _event_structure_quad_clicked, NULL, self));
+                    _connect_structure_button(g->structure_quad, G_CALLBACK(_event_structure_quad_clicked), self));
   g_object_set_data(G_OBJECT(g->structure_lines), DT_ACTION_GESTURE_KEY,
-                    dt_gui_connect_click(g->structure_lines, _event_structure_lines_clicked, NULL, self));
+                    _connect_structure_button(g->structure_lines, G_CALLBACK(_event_structure_lines_clicked), self));
   g_object_set_data(G_OBJECT(g->structure_auto), DT_ACTION_GESTURE_KEY,
-                    dt_gui_connect_click(g->structure_auto, _event_structure_auto_clicked, NULL, self));
+                    _connect_structure_button(g->structure_auto, G_CALLBACK(_event_structure_auto_clicked), self));
   g_signal_connect(G_OBJECT(self->widget), "draw", G_CALLBACK(_event_draw), self);
 
   dt_action_define_iop(self, N_("fit"),

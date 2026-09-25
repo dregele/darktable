@@ -284,19 +284,25 @@ void dt_dev_cleanup(dt_develop_t *dev)
   g_list_free(dev->module_filter_out);
 }
 
+/** How do we handle UI responsiveness for pipes getting a changed parameter?
+    1. We know from pixelpipe started_time when last piperun started
+    2. For fast UI visualizing of processed pipe data we don't shutdown a running
+       pipe if the timespan from last start is less than half of averaged pipe runtime.
+       This possibly avoids superfluous piperuns thus less cache pressure.
+    3. Otherwise it's worth to do a shutdown to avoid further processing.
+*/
+static inline gboolean _inside_pipe_ui_frame(const dt_dev_pixelpipe_t *pipe)
+{
+  const gint64 elapsed = g_get_monotonic_time() - pipe->started_time;
+  return elapsed < pipe->average_delay/2;
+}
+
 void dt_dev_process_image(dt_develop_t *dev)
 {
   if(!dev->gui_attached) return;
   if(dt_pipe_processing(dev->full.pipe))
   {
-    /*  A pipe DT_DEV_PIXELPIPE_STOP_DATA shutdown is the fastest way to get the final
-        processed result presented in the main canvas (or second window as below) but
-        the user won't "see" any results while dragging a mouse slider.
-        Instead of using a timeout we simply use the old behaviour - no forced shutdown -
-        while the left mouse button is pressed (as when dragging a slider) but stay with
-        the faster shutdown system when using clicks as via a mouse scroll wheel.
-    */
-    if(dt_key_modifier_state() & GDK_BUTTON1_MASK)
+    if(_inside_pipe_ui_frame(dev->full.pipe))
       return;
     else
       dt_dev_pixelpipe_set_shutdown(dev->full.pipe, DT_DEV_PIXELPIPE_STOP_DATA);
@@ -318,7 +324,7 @@ void dt_dev_process_preview2(dt_develop_t *dev)
   if(!dev->gui_attached && !dev->preview2.widget) return;
   if(dt_pipe_processing(dev->preview2.pipe))
   {
-    if(dt_key_modifier_state() & GDK_BUTTON1_MASK)
+    if(_inside_pipe_ui_frame(dev->preview2.pipe))
       return;
     else
       dt_dev_pixelpipe_set_shutdown(dev->preview2.pipe, DT_DEV_PIXELPIPE_STOP_DATA);
@@ -2711,6 +2717,9 @@ void dt_dev_read_history_ext(dt_develop_t *dev,
       g_strlcpy(hist->multi_name, multi_name, sizeof(hist->multi_name));
     hist->params = malloc(hist->module->params_size);
     hist->blend_params = malloc(sizeof(dt_develop_blend_params_t));
+    memcpy(hist->params, hist->module->default_params, hist->module->params_size);
+    memcpy(hist->blend_params, hist->module->default_blendop_params,
+           sizeof(dt_develop_blend_params_t));
 
     // update module iop_order only on active history entries
     if(history_end_current > dev->history_end)
@@ -2745,6 +2754,22 @@ void dt_dev_read_history_ext(dt_develop_t *dev,
     else if(is_valid_module_version && is_valid_params_size && is_valid_module_name)
     {
       memcpy(hist->params, module_params, hist->module->params_size);
+    }
+    else if(modversion > hist->module->version())
+    {
+      //  We are loading a module created by another version of
+      //  Darktable and having a module's version greater and unknown
+      //  by this instance. There is no migration possible here to
+      //  recover properly. We just avoid a crash by using the default
+      //  parameters for the given module.
+      const char *fname =
+        dev->image_storage.filename + strlen(dev->image_storage.filename);
+      while(fname > dev->image_storage.filename && *fname != '/') fname--;
+      if(fname > dev->image_storage.filename) fname++;
+
+      dt_control_log(_("%s: module `%s' has unknown version %d, using default parameters"),
+                     fname, hist->module->op,
+                     modversion);
     }
     else
     {
@@ -4320,9 +4345,9 @@ void dt_dev_clear_chroma_troubles(dt_develop_t *dev)
 
   dt_dev_chroma_t *chr = &dev->chroma;
   if(chr->temperature)
-    dt_iop_set_module_trouble_message(chr->temperature, NULL, NULL, NULL);
+    dt_iop_clear_module_trouble_message(chr->temperature);
   if(chr->adaptation)
-    dt_iop_set_module_trouble_message(chr->adaptation, NULL, NULL, NULL);
+    dt_iop_clear_module_trouble_message(chr->adaptation);
 }
 
 void dt_dev_reset_chroma(dt_develop_t *dev)

@@ -179,8 +179,8 @@ if(USE_MCP)
   #
   # Install darktable-mcp tool descriptions/schemas (editable without a rebuild)
   #
-  FILE(COPY mcp-tools.json DESTINATION "${DARKTABLE_DATADIR}")
-  install(FILES mcp-tools.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
+  FILE(COPY mcp_tools.json DESTINATION "${DARKTABLE_DATADIR}")
+  install(FILES mcp_tools.json DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/darktable COMPONENT DTApplication)
 endif(USE_MCP)
 
 #

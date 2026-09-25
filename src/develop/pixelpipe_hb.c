@@ -69,6 +69,7 @@ static inline gboolean _is_debug_pipe(dt_dev_pixelpipe_t *pipe)
 
 // forward declarations for mask cache helpers
 static void _clear_piece_mask_caches(dt_dev_pixelpipe_iop_t *piece);
+static void _clear_piece_distortion_caches(dt_dev_pixelpipe_iop_t *piece);
 static void _free_distort_bufs(dt_dev_pixelpipe_t *pipe);
 
 typedef enum dt_pixelpipe_flow_t
@@ -167,18 +168,21 @@ void dt_print_pipe_ext(const char *title,
   else if(device != DT_DEVICE_NONE)
     snprintf(dev, sizeof(dev), "??? %i", device);
 
-  const gboolean show_roo = roi_out && (!roi_in || memcmp(roi_in, roi_out, sizeof(dt_iop_roi_t)));
+  const gboolean identical = roi_in && roi_out && (memcmp(roi_in, roi_out, sizeof(dt_iop_roi_t)) == 0);
+  const gboolean show_roo = roi_out && !identical;
+
   if(roi_in)
   {
     snprintf(shift, sizeof(shift), "(%i/%i)", roi_in->x, roi_in->y);
     snprintf(area, sizeof(area), "%ix%i", roi_in->width, roi_in->height);
-    snprintf(roi, sizeof(roi), "%11s %10s sc=%.3f%s", shift, area, roi_in->scale, show_roo ? "" : ";");
+    snprintf(roi, sizeof(roi), "%11s %10s sc=%.4f%s", shift, area, roi_in->scale, show_roo ? "" : identical ? " same;" : " none;");
   }
+
   if(show_roo)
   {
     snprintf(shift, sizeof(shift), "(%i/%i)", roi_out->x, roi_out->y);
     snprintf(area, sizeof(area), "%ix%i", roi_out->width, roi_out->height);
-    snprintf(roo, sizeof(roo), " --> %11s %10s sc=%.3f;", shift, area, roi_out->scale);
+    snprintf(roo, sizeof(roo), "%s --> %11s %10s sc=%.4f;", roi_in ? "" : "none", shift, area, roi_out->scale);
   }
 
   if(pipe)
@@ -608,16 +612,14 @@ static void _dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe,
       if(piece->enabled != hist->enabled)
       {
         if(piece->enabled)
-          dt_iop_set_module_trouble_message
-            (piece->module,
+          dt_iop_set_module_trouble_message(piece->module,
              _("enabled as required"),
              _("history had module disabled but it is required for"
                " this type of image.\nlikely introduced by applying a preset,"
                " style or history copy&paste"),
              NULL);
         else
-          dt_iop_set_module_trouble_message
-            (piece->module,
+          dt_iop_set_module_trouble_message(piece->module,
              _("disabled as not appropriate"),
              _("history had module enabled but it is not allowed for this type"
                " of image.\nlikely introduced by applying a preset, style or"
@@ -695,8 +697,14 @@ static void _dev_pixelpipe_synch(dt_dev_pixelpipe_t *pipe,
 static void _iop_prune_stale_raster_users(dt_dev_pixelpipe_t *pipe, dt_iop_module_t *module)
 {
   GHashTable *users = module->raster_mask.source.users;
-  if(!module->dev || !users || g_hash_table_size(users) == 0)
+  if(!module->dev || !users)
     return;
+  dt_iop_raster_users_lock(module);
+  if(g_hash_table_size(users) == 0)
+  {
+    dt_iop_raster_users_unlock(module);
+    return;
+  }
 
   /* Phantom users (deleted or de-synced consumers) keep the source republishing
      -- and invalidating downstream -- every run. Judge each consumer from its
@@ -741,9 +749,13 @@ static void _iop_prune_stale_raster_users(dt_dev_pixelpipe_t *pipe, dt_iop_modul
     // that named us as raster source but is then disabled (or switched its mask
     // to drawn/parametric) leaves a phantom entry that would otherwise keep us
     // publishing -- and invalidating every downstream cacheline -- on every run.
+    // "points back" is read from the piece too: sink->raster_mask.sink is
+    // cleared while another pipe replays history
     const dt_develop_blend_params_t *bp = sink_piece->blendop_data;
-    const gboolean consumes = sink->raster_mask.sink.source == module && sink_piece->enabled &&
-                              bp && (bp->mask_mode & DEVELOP_MASK_RASTER);
+    const gboolean points_back = bp && dt_iop_module_is(module, bp->raster_mask_source)
+                                 && module->multi_priority == bp->raster_mask_instance;
+    const gboolean consumes = points_back && sink_piece->enabled &&
+                              (bp->mask_mode & DEVELOP_MASK_RASTER);
     if(!consumes)
     {
       g_hash_table_iter_remove(&iter);
@@ -757,11 +769,12 @@ static void _iop_prune_stale_raster_users(dt_dev_pixelpipe_t *pipe, dt_iop_modul
                     "dropped '%s%s' (%s)",
                     sink->op,
                     dt_iop_get_instance_id(sink),
-                    sink->raster_mask.sink.source != module ? "de-synced"
+                    !points_back                            ? "de-synced"
                     : !sink_piece->enabled                  ? "disabled"
                                                             : "not in raster mode");
     }
   }
+  dt_iop_raster_users_unlock(module);
 }
 
 void dt_dev_pixelpipe_synch_all(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
@@ -800,10 +813,19 @@ void dt_dev_pixelpipe_synch_all(dt_dev_pixelpipe_t *pipe, dt_develop_t *dev)
      We suppress that per-module flush during replay and settle the buffer once,
      after the whole history has been committed (see below).
 
-     The per-piece mask caches are dropped every synch_all as before; only the
-     scharr buffer is carried across, and only while it is still wanted */
-  for(GList *nodes = pipe->nodes; nodes; nodes = g_list_next(nodes))
-    _clear_piece_mask_caches(nodes->data);
+     The per-piece distortion caches are still dropped every synch_all as before
+     (hash-guarded and cheap); only the scharr buffer is preserved.
+
+     The drawn-mask cache is NOT dropped here, unlike the two above. It exists
+     precisely because refilling it is expensive, and a synch_all runs before
+     essentially every interactive render -- every history change, every mask
+     edit, every overlay toggle -- so clearing it here meant it could never hit
+     in the darkroom and the memoization bought nothing. It does not need the
+     blanket clear either: its key (group hash, roi_out, mask_mode; blend.c)
+     already covers everything a replay can change about the rendered mask.
+     It is still freed with the piece and whenever the scharr is dropped. */
+  for(GList *n = pipe->nodes; n; n = g_list_next(n))
+    _clear_piece_distortion_caches(n->data);
 
   pipe->want_detail_mask = FALSE;
 
@@ -1590,6 +1612,36 @@ static void _cpu_benchmark(dt_dev_pixelpipe_t *pipe,
   darktable.unmuted = old_muted;
 }
 
+// the colorspace transform for blending runs in place on `tmp`, which is the
+// module's input itself when no input transform was needed. For non-raw images
+// (where rawprepare does not run), the first module's input can be pipe->input
+// itself (see "pipe data: full"), the source image every later run of the pipe
+// starts from again, and invalidating a cacheline does not restore it: each run
+// would convert it once more. Raw images always start with rawprepare, which
+// cannot blend, so their blending modules never read pipe->input directly.
+// A screen pipe therefore transforms a copy only for non-raw images; if
+// allocation fails, it reports to the log and falls back to in-place conversion
+static float *_blend_transform_buffer(const dt_dev_pixelpipe_t *pipe,
+                                      const dt_iop_module_t *module,
+                                      float *tmp,
+                                      const float *input,
+                                      const dt_iop_roi_t *roi,
+                                      const int ch)
+{
+  if(tmp != input || !dt_pipe_is_screen(pipe) || dt_image_is_rawprepare_supported(&pipe->image))
+    return tmp;
+  float *copy = dt_iop_image_alloc(roi->width, roi->height, ch);
+  if(!copy)
+  {
+    dt_print_pipe(DT_DEBUG_PIPE, "transform colorspace for blend",
+                  pipe, module, DT_DEVICE_CPU, roi, NULL,
+                  "cannot allocate temporary buffer, in-place transform may corrupt pipe input");
+    return tmp;
+  }
+  dt_iop_image_copy_by_size(copy, input, roi->width, roi->height, ch);
+  return copy;
+}
+
 static gboolean _pixelpipe_process_on_CPU(dt_dev_pixelpipe_t *pipe,
                                           dt_develop_t *dev,
                                           float *input,
@@ -1814,6 +1866,7 @@ static gboolean _pixelpipe_process_on_CPU(dt_dev_pixelpipe_t *pipe,
   {
     if(cst_tmp != blend_cst)
     {
+      tmp = _blend_transform_buffer(pipe, module, tmp, input, roi_in, piece->colors);
       dt_ioppr_transform_image_colorspace(module, tmp, tmp,
                                         roi_in->width, roi_in->height,
                                         cst_tmp, blend_cst, &cst_tmp,
@@ -2239,10 +2292,11 @@ static gboolean _dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
 
   // get region of interest which is needed in input
   module->modify_roi_in(module, piece, roi_out, &roi_in);
-  if((darktable.unmuted & DT_DEBUG_PIPE) && memcmp(roi_out, &roi_in, sizeof(dt_iop_roi_t)))
+  if((darktable.unmuted & DT_DEBUG_PIPE) && dt_iop_module_modifies_roi_in(module))
   {
+    const gboolean modified = memcmp(roi_out, &roi_in, sizeof(dt_iop_roi_t));
     dt_print_pipe(DT_DEBUG_PIPE,
-                  "modified roi IN",
+                  modified ? "modified roi IN" : "identical roi IN",
                   pipe, module, DT_DEVICE_NONE, roi_out, &roi_in, "ID=%i",
                   pipe->image.id);
   }
@@ -2903,6 +2957,7 @@ static gboolean _dev_pixelpipe_process_rec(dt_dev_pixelpipe_t *pipe,
         {
           if(cst_tmp != blend_cst)
           {
+            tmp = _blend_transform_buffer(pipe, module, tmp, input, &roi_in, piece->colors);
             dt_ioppr_transform_image_colorspace(module, tmp, tmp,
                                               roi_in.width, roi_in.height,
                                               cst_tmp, blend_cst, &cst_tmp,
@@ -3418,7 +3473,7 @@ restart:
     dt_get_available_mem();
   #endif
   dt_print_pipe(DT_DEBUG_PIPE, "pipe starting",
-                  pipe, NULL, pipe->devid, &roi, &roi, "'%s' ID=%i using %luMB",
+                  pipe, NULL, pipe->devid, NULL, &roi, "'%s' ID=%i using %luMB",
                   pipe->image.filename, pipe->image.id, avail_mem / DT_MEGA);
   dt_print_mem_usage("before pixelpipe process");
 
@@ -3474,7 +3529,7 @@ restart:
     dt_dev_pixelpipe_change(pipe, dev);
 
     dt_print_pipe(DT_DEBUG_PIPE | DT_DEBUG_OPENCL,
-      "pipe restarting on CPU", pipe, NULL, old_devid, &roi, &roi, "ID=%i",
+      "pipe restarting on CPU", pipe, NULL, old_devid, NULL, &roi, "ID=%i",
       pipe->image.id);
 
     goto restart; // try again (this time without opencl)
@@ -3536,7 +3591,7 @@ restart:
     dt_dev_pixelpipe_cache_report(pipe);
 
   dt_print_pipe(DT_DEBUG_PIPE, "pipe finished",
-                pipe, NULL, old_devid, &roi, &roi, "'%s' ID=%i",
+                pipe, NULL, old_devid, &roi, NULL, "'%s' ID=%i",
                 pipe->image.filename, pipe->image.id);
   dt_print_mem_usage("after pixelpipe process");
 
@@ -3570,10 +3625,11 @@ void dt_dev_pixelpipe_get_dimensions(dt_dev_pixelpipe_t *pipe,
     {
       module->modify_roi_out(module, piece, &roi_out, &roi_in);
       if((darktable.unmuted & DT_DEBUG_PIPE)
-         && memcmp(&roi_out, &roi_in, sizeof(dt_iop_roi_t)))
+          && dt_iop_module_modifies_roi_out(module))
       {
+        const gboolean modified = memcmp(&roi_out, &roi_in, sizeof(dt_iop_roi_t));
         dt_print_pipe(DT_DEBUG_PIPE,
-                      "modified roi OUT",
+                      modified ? "modified roi OUT" : "identical roi OUT",
                       pipe, module, DT_DEVICE_NONE, &roi_in, &roi_out);
       }
     }
@@ -3656,8 +3712,8 @@ static inline gboolean _use_mask_cache(void)
 }
 
 // release a cached mask and account for the freed memory
-static void _clear_mask_cache(dt_dev_pixelpipe_t *pipe,
-                              dt_dev_distorted_mask_cache_t *c)
+void dt_dev_pixelpipe_clear_mask_cache(dt_dev_pixelpipe_t *pipe,
+                                       dt_dev_distorted_mask_cache_t *c)
 {
   dt_free_align(c->data);
   if(pipe)
@@ -3669,9 +3725,9 @@ static void _clear_mask_cache(dt_dev_pixelpipe_t *pipe,
    returns FALSE if we can't or don't want to cache, in that case any
    possibly available data have been released.
 */
-static gboolean _prepare_mask_cache(dt_dev_pixelpipe_iop_t *piece,
-                                    dt_dev_distorted_mask_cache_t *c,
-                                    const size_t num_floats)
+gboolean dt_dev_pixelpipe_prepare_mask_cache(dt_dev_pixelpipe_iop_t *piece,
+                                            dt_dev_distorted_mask_cache_t *c,
+                                            const size_t num_floats)
 {
   dt_dev_pixelpipe_t *pipe = piece->pipe;
   const size_t needed = num_floats * sizeof(float);
@@ -3679,13 +3735,13 @@ static gboolean _prepare_mask_cache(dt_dev_pixelpipe_iop_t *piece,
   // also releases data kept from before the user lowered the resource level
   if(!_use_mask_cache() || num_floats == 0)
   {
-    _clear_mask_cache(pipe, c);
+    dt_dev_pixelpipe_clear_mask_cache(pipe, c);
     return FALSE;
   }
 
   // realloc only if size changed
   if(c->data && c->size != needed)
-    _clear_mask_cache(pipe, c);
+    dt_dev_pixelpipe_clear_mask_cache(pipe, c);
 
   if(!c->data)
   {
@@ -3705,7 +3761,7 @@ _update_detail_mask_cache(dt_dev_pixelpipe_iop_t *piece, const float *data,
   dt_dev_distorted_mask_cache_t *c = &piece->detail_mask_cache;
   const size_t num_floats = (size_t)roi->width * roi->height;
 
-  if(_prepare_mask_cache(piece, c, num_floats))
+  if(dt_dev_pixelpipe_prepare_mask_cache(piece, c, num_floats))
   {
     dt_iop_image_copy(c->data, data, num_floats);
     c->roi = *roi;
@@ -3724,7 +3780,7 @@ static void _update_raster_mask_cache(dt_dev_pixelpipe_iop_t *piece,
   dt_dev_distorted_mask_cache_t *c = &piece->raster_mask_cache;
   const size_t num_floats = (size_t)roi->width * roi->height;
 
-  if(_prepare_mask_cache(piece, c, num_floats))
+  if(dt_dev_pixelpipe_prepare_mask_cache(piece, c, num_floats))
   {
     dt_iop_image_copy(c->data, data, num_floats);
     c->roi = *roi;
@@ -3732,10 +3788,20 @@ static void _update_raster_mask_cache(dt_dev_pixelpipe_iop_t *piece,
   }
 }
 
+// the distortion caches only: what a history replay may safely drop, because
+// refilling them is cheap. Kept apart from the drawn-mask cache, which is
+// expensive to refill and carries a key that already covers everything a
+// replay can change -- see dt_dev_pixelpipe_synch_all().
+static void _clear_piece_distortion_caches(dt_dev_pixelpipe_iop_t *piece)
+{
+  dt_dev_pixelpipe_clear_mask_cache(piece->pipe, &piece->detail_mask_cache);
+  dt_dev_pixelpipe_clear_mask_cache(piece->pipe, &piece->raster_mask_cache);
+}
+
 static void _clear_piece_mask_caches(dt_dev_pixelpipe_iop_t *piece)
 {
-  _clear_mask_cache(piece->pipe, &piece->detail_mask_cache);
-  _clear_mask_cache(piece->pipe, &piece->raster_mask_cache);
+  _clear_piece_distortion_caches(piece);
+  dt_dev_pixelpipe_clear_mask_cache(piece->pipe, &piece->drawn_mask_cache);
 }
 
 static inline gboolean _distort_piece_roi(const dt_dev_pixelpipe_iop_t *piece)
@@ -3830,7 +3896,12 @@ float *dt_dev_get_raster_mask(dt_dev_pixelpipe_iop_t *piece,
   float *raster_mask = NULL;
   dt_iop_roi_t *final_roi = &piece->processed_roi_out;
 
-  const dt_develop_mask_mode_t maskmode = source_piece->enabled ? source_piece->module->blend_params->mask_mode : DEVELOP_MASK_DISABLED;
+  // judge the source by its piece: the module's blend params are rewritten
+  // with the defaults while another pipe replays history, and a source read
+  // as not writing loses its stored mask here
+  const dt_develop_blend_params_t *const sbp = source_piece->blendop_data;
+  const dt_develop_mask_mode_t maskmode =
+    source_piece->enabled && sbp ? sbp->mask_mode : DEVELOP_MASK_DISABLED;
   const gboolean source_writing = (maskmode > DEVELOP_MASK_ENABLED)
                                 || (source_piece->module->flags() & IOP_FLAGS_WRITE_RASTER);
   /* there might be stale masks from disabled modules or modules that don't write masks.
@@ -4053,14 +4124,13 @@ gboolean dt_dev_write_scharr_mask(dt_dev_pixelpipe_iop_t *piece,
   p->scharr.hash = dt_hash(DT_INITHASH, &p->scharr.roi, sizeof(dt_iop_roi_t));
 
   dt_print_pipe(DT_DEBUG_PIPE | DT_DEBUG_VERBOSE, "write scharr mask CPU",
-                p, NULL, DT_DEVICE_CPU, NULL, NULL, "(%ix%i)",
-                roi->width, roi->height);
+                p, NULL, DT_DEVICE_CPU, roi, NULL);
   return FALSE;
 
  error:
   dt_print_pipe(DT_DEBUG_ALWAYS,
                 "couldn't write scharr mask CPU",
-                p, NULL, DT_DEVICE_CPU, NULL, NULL);
+                p, NULL, DT_DEVICE_CPU, roi, NULL);
   return TRUE;
 }
 
@@ -4117,14 +4187,13 @@ int dt_dev_write_scharr_mask_cl(dt_dev_pixelpipe_iop_t *piece,
   p->scharr.hash = dt_hash(DT_INITHASH, &p->scharr.roi, sizeof(dt_iop_roi_t));
 
   dt_print_pipe(DT_DEBUG_PIPE | DT_DEBUG_VERBOSE, "write scharr mask CL",
-                p, NULL, devid, NULL, NULL, "(%ix%i)",
-                width, height);
+                p, NULL, devid, roi, NULL);
 
   error:
   if(err != CL_SUCCESS)
   {
     dt_print_pipe(DT_DEBUG_ALWAYS,
-                  "couldn't write scharr mask CL", p, NULL, devid, NULL, NULL,
+                  "couldn't write scharr mask CL", p, NULL, devid, roi, NULL,
                   "%s", cl_errstr(err));
     dt_dev_clear_scharr_mask(p);
   }

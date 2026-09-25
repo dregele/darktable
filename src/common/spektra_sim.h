@@ -286,8 +286,8 @@ void sf_sim_film_grain3(const sf_sim_t *sim,
  * to take back off to recover a zero-mean delta. Equals grain_density_min for a
  * single-layer stock, but NOT in general: the multi-sub-layer table's floors are
  * density_max_fractions[l] * density_min and their sum is not constrained to
- * density_min. Subtracting grain_density_min instead left the delta with a
- * constant positive mean of (sum - density_min) per unit grain strength. */
+ * density_min. Only this sum leaves the delta zero-mean; grain_density_min in
+ * its place biases it by (sum - density_min) per unit grain strength. */
 void sf_sim_grain_dmin_total(const sf_sim_t *sim,
                              float dmin_total[3]);
 
@@ -453,7 +453,12 @@ typedef struct sf_sim_params_t
   double coupler_tail_weight;   /* -1 = from pack */
 
   /* grain reference floor — used for table ranges even when grain itself
-   * runs in the caller (reference: GrainParams.density_min) */
+   * runs in the caller (reference: GrainParams.density_min).
+   * Resolved by sf_sim_build(), not supplied: the pack's per-film value is read
+   * over whatever is here and grain_density_min_scale below is then applied, so
+   * a caller sets the scale and reads this back rather than writing it. What is
+   * here on entry survives only for a stock the pack does not characterise,
+   * which is what the (0.03, 0.03, 0.03) default is for. */
   double grain_density_min[3];  /* (0.03, 0.03, 0.03) */
   /* [dt] Overrides for the per-stock grain statistics the pack supplies, which
    * are what actually decide how coarse the grain is: rms_granularity sets the
@@ -466,7 +471,9 @@ typedef struct sf_sim_params_t
    * and one slider can move all three channels together. */
   double grain_rms_scale;       /* -1 = from pack */
   double grain_uniformity_scale;/* -1 = from pack */
-  double grain_particle_scale;  /* -1 = from pack; scales the sub-layer areas */
+  double grain_particle_scale;  /* -1 = from pack; scales the FINER sub-layers'
+                                   areas, sub-layer 0 (coarsest) stays 1.0 */
+  double grain_density_min_scale;/* -1 = from pack */
 
   /* enlarger */
   const char *enlarger_illuminant; /* "TH-KG3" */

@@ -58,10 +58,6 @@
 #include "spektra_core.h"
 
 #include <math.h>
-/* ensure C99 math functions for SF_POW10F/SF_LOG10F (exp2f, log2f) */
-#if !defined(exp2f) && !defined(_GNU_SOURCE)
-/* exp2f and log2f are C99; every compiler since GCC 4.x / Clang 3.x has them */
-#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,11 +89,15 @@ static inline void neon_mat3_mulv_batch(const float m[9],
 }
 #endif /* __ARM_NEON */
 
-/* Fast pow10 / log10 via exp2f/log2f. Using compiler builtins gives the
-   optimizer a better chance to inline/reduce them vs libm powf(10, x)
-   which internally computes exp2(x * log2(10)) with extra overhead. */
-#define SF_POW10F(x) __builtin_exp2f((x) * 3.321928094887362f)  /* x * log2f(10) */
-#define SF_LOG10F(x) (__builtin_log2f(x) * 0.3010299956639812f)  /* log2f(x) * log10(2) */
+/* pow10 / log10 through spektra_core.h's own exp2/log2, NOT the platform
+   exp2f/log2f. The kernel has to compute the same thing, and OpenCL specifies
+   exp2/log2 only to <=3 ULP where glibc rounds correctly, so a library call
+   here is a library call the GPU cannot match. grain_exp2f/grain_log2f are built
+   from correctly-rounded operations alone and agree bit-for-bit on both
+   sides; see their comment for why a ULP here is not a ULP by the time it
+   reaches the grain sampler. */
+#define SF_POW10F(x) grain_exp2f((x) * 3.321928094887362f)  /* x * log2f(10) */
+#define SF_LOG10F(x) (grain_log2f(x) * 0.3010299956639812f)  /* log2f(x) * log10(2) */
 #define SF_TC_KNEE_T 0.0 /* [gc] InputGamutCompressSpec.knee */
 #define SF_TC_KNEE_L 1.0
 #define SF_TC_KNEE_P 6.0
@@ -431,7 +431,7 @@ struct sf_sim_t
   double grain_layer_npart[SF_GRAIN_MAX_SUBLAYERS][3];
   /* per-sublayer density floor (density_max_fractions[sl] * grain_density_min),
      needed to convert the interpolated net sub-layer density back to the
-     absolute value sf_layer_particle() expects. */
+     absolute value grain_layer_particle() expects. */
   double grain_layer_dmin[SF_GRAIN_MAX_SUBLAYERS][3];
   /* raw (un-summed) per-sub-layer curve terms across the exposure grid, and
      their sum (self-consistent by construction, used as the lookup axis to
@@ -1320,6 +1320,7 @@ void sf_sim_params_defaults(sf_sim_params_t *p)
   p->grain_rms_scale = -1.0;
   p->grain_uniformity_scale = -1.0;
   p->grain_particle_scale = -1.0;
+  p->grain_density_min_scale = -1.0;
   p->coupler_diffusion_um = -1.0;
   p->coupler_tail_um = -1.0;
   p->coupler_tail_weight = -1.0;
@@ -1700,13 +1701,12 @@ static void bilinear_2d_clamped(double out[3],
    differently depending on which device ran.
 
    Every step here is float32 -- base/fraction, the Mitchell weights, the
-   accumulator and the normalising divide -- because sf_cubic2d is. This
-   function used to carry the _f only in its name and its LUT type, and do all
-   of its arithmetic in double; that made the very first pipeline stage
-   disagree with the GPU on essentially every pixel, and since the grain
-   sampler downstream turns a sub-ULP input difference into a whole-integer
-   Poisson draw difference, nothing further down the pipe could ever agree
-   either. Keep this in float. */
+   accumulator and the normalising divide -- because sf_cubic2d is. The _f is
+   not just the name and the LUT type: doing the arithmetic in double instead
+   makes the very first pipeline stage disagree with the GPU on essentially
+   every pixel, and the grain sampler downstream turns a sub-ULP input
+   difference into a whole-integer Poisson draw difference, so nothing further
+   down the pipe can agree either. Keep this in float. */
 static void cubic_interp_2d_f(float out[3],
                               const float *lut,
                               int L,
@@ -2811,9 +2811,8 @@ static inline float cmax_lookup_f(const sf_sim_t *s,
 /* [gc] compress_rgb_oklch_chroma with lightness_compression (0.7, 1, 2.2),
    in float, matching spektrafilm.cl's compress_mode == 1 branch term for term
    (same hypot/atan2 operand order, same knee constants). sf_sim_scan is the
-   only caller, so this replaces the double compress_rgb_oklch outright rather
-   than sitting next to it -- keeping both would leave the double one unused
-   and trip -Werror=unused-function.
+   only caller, so this is the only compress_rgb_oklch there is -- a double
+   twin alongside it would be unused and trip -Werror=unused-function.
 
    The double xyz_to_oklab/oklab_to_xyz do survive, on their own merits:
    oklab_to_xyz for build_cmax_table and xyz_to_oklab for the colour picker's
@@ -3449,8 +3448,26 @@ sf_sim_t *sf_sim_build(const sf_pack_t *pack,
     if(p->grain_uniformity_scale >= 0.0)
       for(int c = 0; c < 3; c++)
         s->grain_uniformity[c] = fmin(s->grain_uniformity[c] * p->grain_uniformity_scale, 0.999);
+    /* A scale and not an absolute value, for the same reason rms and uniformity
+       are: the pack's floors are per channel -- kodak_vision3_500t is
+       0.12/0.10/0.35 -- and one number replacing all three would flatten a
+       shape that carries real colour information. Scaling keeps the stock's own
+       ratios and still reaches any overall floor. Applied after the pack read,
+       so it lands on the film's own value; sf_pack_film_grain() leaves
+       p->grain_density_min alone for a stock it does not characterise, and the
+       scale then multiplies the caller's fallback instead. */
+    if(p->grain_density_min_scale >= 0.0)
+      for(int c = 0; c < 3; c++) p->grain_density_min[c] *= p->grain_density_min_scale;
+    /* Sub-layer 0 is the coarsest and stays the reference at 1.0: this control
+       moves the FINER sub-layers relative to it, so it starts at i == 1.
+       Scaling the whole array instead is an exact no-op -- _sf_build_grain_layers
+       derives a_coarsest as sig^2*A48/peak[c], peak[c] is linear in
+       particle_scale[], and particle_area = a_coarsest * particle_scale[l], so a
+       common factor k cancels and every layer_npart comes out unchanged. The
+       only value that did anything was exactly 0, where the 1e-9 floors on peak
+       and particle_area take over and npart explodes, i.e. grain disappears. */
     if(p->grain_particle_scale >= 0.0)
-      for(int i = 0; i < n_scale; i++) particle_scale[i] *= p->grain_particle_scale;
+      for(int i = 1; i < n_scale; i++) particle_scale[i] *= p->grain_particle_scale;
     _sf_build_grain_layers(s, film, p->grain_density_min, s->grain_uniformity,
                            s->grain_rms, particle_scale, n_scale);
   }
@@ -4292,11 +4309,11 @@ void sf_sim_scan(const sf_sim_t *sim,
       lx[0] = (float)lxd[0]; lx[1] = (float)lxd[1]; lx[2] = (float)lxd[2];
     }
     /* float from here on, matching spektrafilm_scan in spektrafilm.cl term
-       for term (POW10F is already float; lx above is float in every branch
-       above already too) -- this used to switch to double here for no
-       reason tied to accuracy, which meant every pixel's gamut compression
-       silently disagreed with the GPU path. See compress_rgb_oklch_f's
-       comment for what still legitimately stays in double (build_cmax_table). */
+       for term (POW10F is already float, and lx above is float in every branch
+       too). Switching to double here would buy no accuracy and would make
+       every pixel's gamut compression disagree with the GPU path. See
+       compress_rgb_oklch_f's comment for what legitimately stays in double
+       (build_cmax_table). */
     float xyz[3]; float rgb[3];
     for(int m = 0; m < 3; m++) xyz[m] = SF_POW10F(lx[m]);
     if(sim->out_luminance_boost != 1.0)
@@ -4423,12 +4440,12 @@ sf_sim_gpu_t *sf_sim_gpu_export(const sf_sim_t *s)
     for(int c = 0; c < 3; c++)
     {
       g->enl_lo[c] = (float)s->enl_lo[c];
-      /* Not (float)s->enl_hi[c] -- the kernel no longer receives hi at all.
-         See spektrafilm.cl's spektrafilm_print_expose for why re-deriving
-         hi-lo on-device is the wrong thing to upload; this is already the
-         single correctly-rounded reciprocal the CPU fast path itself uses
-         (sf_sim_print_expose above), so GPU and CPU now run byte-identical
-         range math instead of two different roundings of the same range. */
+      /* The reciprocal, not (float)s->enl_hi[c]: the kernel takes no hi at
+         all. See spektrafilm.cl's spektrafilm_print_expose for why re-deriving
+         hi-lo on-device is the wrong thing to upload. This is the same
+         correctly-rounded reciprocal the CPU fast path uses
+         (sf_sim_print_expose above), so both paths run byte-identical range
+         math rather than two roundings of the same range. */
       g->enl_inv_range[c] = s->enl_inv_range[c];
     }
     g->enl_lut = dup_f(s->enl_lut, n3);
@@ -4696,9 +4713,9 @@ void sf_grain_delta_ml(const sf_grain_layers_t *layers,
     {
       const float raw = _sf_grain_curve_sample(&layers->layer_curve[0][sl][1], nle, lstride, pos);
       const float d_abs = raw + (float)layers->layer_dmin[sl][1];
-      total_abs += sf_layer_particle(d_abs, (float)layers->layer_dmax[sl][1],
+      total_abs += grain_layer_particle(d_abs, (float)layers->layer_dmax[sl][1],
                                      (float)layers->layer_npart[sl][1] * npart_scale,
-                                     unif_c[1], sf_pixel_seed(xi, yi, (uint32_t)(sl * 10)));
+                                     unif_c[1], grain_pixel_seed(xi, yi, (uint32_t)(sl * 10)));
     }
     const float g = total_abs - dmin_c[1];
     const float d = (g - dm) * amount;
@@ -4714,9 +4731,9 @@ void sf_grain_delta_ml(const sf_grain_layers_t *layers,
     {
       const float raw = _sf_grain_curve_sample(&layers->layer_curve[0][sl][c], nle, lstride, pos);
       const float d_abs = raw + (float)layers->layer_dmin[sl][c];
-      total_abs += sf_layer_particle(d_abs, (float)layers->layer_dmax[sl][c],
+      total_abs += grain_layer_particle(d_abs, (float)layers->layer_dmax[sl][c],
                                      (float)layers->layer_npart[sl][c] * npart_scale,
-                                     unif_c[c], sf_pixel_seed(xi, yi, (uint32_t)(c + sl * 10)));
+                                     unif_c[c], grain_pixel_seed(xi, yi, (uint32_t)(c + sl * 10)));
     }
     const float g = total_abs - dmin_c[c];
     out_delta[c] = (g - dens[c]) * amount;
@@ -4758,8 +4775,8 @@ void sf_grain_raw_samples_ml(const sf_grain_layers_t *layers,
     const float raw = _sf_grain_curve_sample(&layers->layer_curve[0][sl][channel_idx], nle,
                                              lstride, pos);
     const float d_abs = raw + (float)layers->layer_dmin[sl][channel_idx];
-    raw_out[sl] = sf_layer_particle(d_abs, (float)layers->layer_dmax[sl][channel_idx],
+    raw_out[sl] = grain_layer_particle(d_abs, (float)layers->layer_dmax[sl][channel_idx],
                                     (float)layers->layer_npart[sl][channel_idx] * npart_scale,
-                                    unif_c, sf_pixel_seed(xi, yi, (uint32_t)(seed_ch + sl * 10)));
+                                    unif_c, grain_pixel_seed(xi, yi, (uint32_t)(seed_ch + sl * 10)));
   }
 }

@@ -74,7 +74,8 @@ typedef unsigned int u_int;
 #include <sys/types.h>
 #endif
 #if defined(__NetBSD__) || defined(__OpenBSD__)
-#include <sys/param.h>
+typedef unsigned long u_long;
+#include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -145,10 +146,15 @@ G_BEGIN_DECLS
 /* Create cloned functions for various CPU SSE generations */
 /* See for instructions https://hannes.hauswedell.net/post/2017/12/09/fmv/ */
 /* TL;DR : use only on SIMD functions containing low-level paralellized/vectorized loops */
-#if __has_attribute(target_clones) && !defined(_WIN32) && !defined(NATIVE_ARCH) && !defined(__APPLE__) && defined(__GLIBC__)
+#if __has_attribute(target_clones) \
+    && (((defined(__linux__) || defined(__GNU__)) && defined(__GLIBC__)) \
+        || (!defined(NATIVE_ARCH) \
+            && !defined(_WIN32) \
+            && !defined(__APPLE__) \
+            && !defined(__OpenBSD__)))
 # if defined(__amd64__) || defined(__amd64) || defined(__x86_64__) || defined(__x86_64)
 #define __DT_CLONE_TARGETS__ __attribute__((target_clones("default", "sse2", "sse3", "sse4.1", "sse4.2", "popcnt", "avx", "avx2", "avx512f", "fma4")))
-# elif defined(__PPC64__)
+# elif defined(__PPC64__) && defined(__GLIBC__)
 /* __PPC64__ is the only macro tested for in is_supported_platform.h, other macros would fail there anyway. */
 #define __DT_CLONE_TARGETS__ __attribute__((target_clones("default","cpu=power9")))
 # else
@@ -492,7 +498,7 @@ typedef struct darktable_t
   char *bench_module;
   dt_lua_state_t lua_state;
   GList *guides;
-  double start_wtime;
+  gint64 start_mtime;
   GList *themes;
   int32_t unmuted_signal_dbg_acts;
   gboolean unmuted_signal_dbg[DT_SIGNAL_COUNT];
@@ -526,6 +532,10 @@ int dt_init(int argc, char *argv[],
             const gboolean init_gui,
             const gboolean load_data,
             lua_State *L);
+
+#ifdef _WIN32
+void dt_request_console_notice(void);
+#endif
 
 void dt_get_sysresource_level();
 void dt_cleanup();
@@ -735,9 +745,7 @@ void dt_capabilities_cleanup();
 
 static inline double dt_get_wtime(void)
 {
-  struct timeval time;
-  gettimeofday(&time, NULL);
-  return time.tv_sec - 1290608000 + (1.0 / 1000000.0) * time.tv_usec;
+  return(double)(g_get_monotonic_time() - darktable.start_mtime) * 1e-6;
 }
 
 static inline double dt_get_debug_wtime(void)
@@ -884,20 +892,6 @@ static inline float *dt_calloc_perthread_float(const size_t n,
 // return a pointer to the indicated thread's private buffer.
 #define dt_get_bythread(buf, padsize, tnum) \
   DT_IS_ALIGNED((buf) + ((padsize) * (tnum)))
-
-// Most code in dt assumes that the compiler is capable of
-// auto-vectorization.  In some cases, this will yield suboptimal code
-// if the compiler in fact does NOT auto-vectorize.  Uncomment the
-// following line for such a compiler.
-
-//#define DT_NO_VECTORIZATION
-
-// For some combinations of compiler and architecture, the compiler
-// may actually emit inferior code if given a hint to vectorize a
-// loop.  Uncomment the following line if such a combination is the
-// compilation target.
-
-//#define DT_NO_SIMD_HINTS
 
 // copy the RGB channels of a pixel; includes the 'alpha' channel as
 // well if faster due to vectorization, but subsequent code should
