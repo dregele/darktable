@@ -101,6 +101,10 @@ changes (where available).
 
 ## UI/UX Improvements
 
+- Tethered autofocus can now be held until explicitly released and reports
+  camera focus status. Focus bracketing waits for confirmed focus before
+  taking the first frame when prefocus is enabled.
+
 - The code has received a large set of changes in preparation of the
   Gtk4 migration.
   - The code for handling popover menus has been changed.
