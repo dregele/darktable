@@ -83,8 +83,6 @@ typedef struct dt_camera_focus_bracket_t
   uint32_t settle_ms;
   /** run an autofocus half-press before the first capture */
   gboolean prefocus;
-  /** hold time in ms for the optional prefocus half-press */
-  uint32_t af_hold_ms;
 } dt_camera_focus_bracket_t;
 
 static int32_t dt_camera_capture_job_run(dt_job_t *job)
@@ -276,9 +274,19 @@ static gboolean _sleep_cancellable(dt_job_t *job, uint32_t ms)
   return dt_control_job_get_state(job) == DT_JOB_STATE_CANCELLED;
 }
 
-// settle time after releasing an autofocus half-press, before the lens
-// is considered focused and it's safe to move on
-#define DT_CAMERA_AF_HALFPRESS_SETTLE_MS 300
+static void _focus_bracket_af_changed(const dt_camera_t *camera,
+                                      dt_camctl_af_state_t state, void *data)
+{
+  const gint previous = g_atomic_int_get((gint *)data);
+  if(previous != DT_CAMCTL_AF_ACQUIRED && previous != DT_CAMCTL_AF_FAILED)
+    g_atomic_int_set((gint *)data, state);
+}
+
+static void _focus_bracket_control_status(dt_camctl_status_t status, void *data)
+{
+  if(status == CAMERA_CONTROL_AVAILABLE)
+    _focus_bracket_af_changed(NULL, DT_CAMCTL_AF_FAILED, data);
+}
 
 /** Focus bracketing: repeatedly nudge the lens focus with the camera's
  * manual focus stepping action and capture a frame after each move.
@@ -301,17 +309,38 @@ static int32_t dt_camera_focus_bracket_job_run(dt_job_t *job)
            ngettext("focus bracketing: capturing %d frame",
                     "focus bracketing: capturing %d frames", total), total);
 
-  if(params->prefocus
-     && dt_camctl_camera_property_exists(darktable.camctl, NULL, "autofocus"))
+  if(params->prefocus)
   {
-    // shutter half-press begin/end: this is the only autofocus trigger
-    // strategy that works reliably across Sony bodies
-    dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 1);
-    if(_sleep_cancellable(job, params->af_hold_ms))
-      return 0;
-    dt_camctl_camera_set_property_int(darktable.camctl, NULL, "autofocus", 0);
-    if(_sleep_cancellable(job, DT_CAMERA_AF_HALFPRESS_SETTLE_MS))
-      return 0;
+    dt_camera_t *cam = (dt_camera_t *)darktable.camctl->active_camera;
+    if(!cam || !dt_camctl_camera_property_exists(darktable.camctl, cam, "focusindication"))
+    {
+      dt_control_log(_("camera does not report autofocus status, can't prefocus"));
+      return 1;
+    }
+    dt_pthread_mutex_lock(&cam->jobqueue_lock);
+    const gboolean pressed = cam->is_af_halfpressed;
+    dt_pthread_mutex_unlock(&cam->jobqueue_lock);
+    if(pressed)
+    {
+      dt_control_log(_("release autofocus half-press before starting focus bracketing"));
+      return 1;
+    }
+    gint state = DT_CAMCTL_AF_UNKNOWN;
+    dt_camctl_listener_t listener = { 0 };
+    listener.data = &state;
+    listener.control_status = _focus_bracket_control_status;
+    listener.camera_autofocus_status_changed = _focus_bracket_af_changed;
+    dt_camctl_register_listener(darktable.camctl, &listener);
+    const gboolean started = dt_camctl_camera_start_af_halfpress(darktable.camctl, cam);
+    if(started)
+      while(g_atomic_int_get(&state) != DT_CAMCTL_AF_ACQUIRED
+            && g_atomic_int_get(&state) != DT_CAMCTL_AF_FAILED)
+        if(_sleep_cancellable(job, DT_CAMERA_FOCUS_BRACKET_SLEEP_SLICE_MS)) break;
+    if(darktable.camctl->active_camera == cam)
+      dt_camctl_camera_release_af_halfpress(darktable.camctl, cam);
+    dt_camctl_unregister_listener(darktable.camctl, &listener);
+    if(!started || g_atomic_int_get(&state) != DT_CAMCTL_AF_ACQUIRED)
+      return 1;
   }
 
   const int step = CLAMP((int)params->step,
@@ -355,8 +384,7 @@ dt_job_t *dt_camera_focus_bracket_job_create(const uint32_t frames,
                                              const uint32_t step,
                                              const gboolean near,
                                              const uint32_t settle_ms,
-                                             const gboolean prefocus,
-                                             const uint32_t af_hold_ms)
+                                             const gboolean prefocus)
 {
   dt_job_t *job = dt_control_job_create(&dt_camera_focus_bracket_job_run,
                                         "focus bracket capture of image(s)");
@@ -377,7 +405,6 @@ dt_job_t *dt_camera_focus_bracket_job_create(const uint32_t frames,
   params->near = near;
   params->settle_ms = settle_ms;
   params->prefocus = prefocus;
-  params->af_hold_ms = af_hold_ms;
   return job;
 }
 

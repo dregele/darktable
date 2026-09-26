@@ -189,9 +189,6 @@ static void _zoom_live_view_clicked(GtkWidget *widget, gpointer user_data)
   }
 }
 
-// hold time for the Sony shutter half-press AF fallback below; see
-// dt_camctl_camera_trigger_af_halfpress()
-#define DT_LIVE_VIEW_AF_HALFPRESS_HOLD_MS 300
 // step magnitudes for the Sony manual focus fallback below (1 fine ..
 // 7 coarse); NEAR/FAR use a small nudge and NEARER/FARTHER a larger
 // one, mirroring the "nudge" vs "big move" distinction the Canon/Nikon
@@ -209,8 +206,14 @@ static void _auto_focus_button_clicked(GtkWidget *widget, gpointer user_data)
     // Sony bodies don't expose a dedicated "run autofocus" property;
     // they only support triggering AF through shutter half-press
     // emulation, so that's the only fallback path we try
-    if(!dt_camctl_camera_trigger_af_halfpress(darktable.camctl, NULL,
-                                              DT_LIVE_VIEW_AF_HALFPRESS_HOLD_MS))
+    dt_camera_t *cam = (dt_camera_t *)darktable.camctl->active_camera;
+    if(!cam) return;
+    dt_pthread_mutex_lock(&cam->jobqueue_lock);
+    const gboolean pressed = cam->is_af_halfpressed;
+    dt_pthread_mutex_unlock(&cam->jobqueue_lock);
+    if(pressed)
+      dt_camctl_camera_release_af_halfpress(darktable.camctl, cam);
+    else if(!dt_camctl_camera_start_af_halfpress(darktable.camctl, cam))
     {
       dt_print(DT_DEBUG_CAMCTL,
                "[camera control] unable to get property type for %s", property);
@@ -389,7 +392,7 @@ void gui_init(dt_lib_module_t *self)
                                    N_("move focus point in (small steps)"));// TODO icon not centered
   lib->auto_focus = NEW_BUTTON(,dtgtk_cairo_paint_lock, 0,
                                _auto_focus_button_clicked, GINT_TO_POINTER(1),
-                               N_("run autofocus"));
+                               N_("run autofocus; click again to release shutter half-press"));
   lib->focus_out_small = NEW_BUTTON(,dtgtk_cairo_paint_arrow, CPF_DIRECTION_RIGHT,
                                     _focus_button_clicked,
                                     GINT_TO_POINTER(DT_FOCUS_FAR),

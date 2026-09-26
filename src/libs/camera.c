@@ -203,17 +203,32 @@ static void _camera_property_accessibility_changed(const dt_camera_t *camera,
 {
 }
 
-// how long to hold the shutter half-press for an autofocus trigger.
-// Sony bodies only expose autofocus this way (no dedicated "run
-// autofocus" action), so this is the one and only AF trigger path; see
-// dt_camctl_camera_trigger_af_halfpress().
-#define DT_CAMERA_AF_HALFPRESS_HOLD_MS 300
-
 static void _af_button_clicked(GtkWidget *widget, gpointer user_data)
 {
-  if(!dt_camctl_camera_trigger_af_halfpress(darktable.camctl, NULL, DT_CAMERA_AF_HALFPRESS_HOLD_MS))
+  dt_camera_t *cam = (dt_camera_t *)darktable.camctl->active_camera;
+  if(!cam) return;
+  dt_pthread_mutex_lock(&cam->jobqueue_lock);
+  const gboolean pressed = cam->is_af_halfpressed;
+  dt_pthread_mutex_unlock(&cam->jobqueue_lock);
+  if(pressed)
+    dt_camctl_camera_release_af_halfpress(darktable.camctl, cam);
+  else if(!dt_camctl_camera_start_af_halfpress(darktable.camctl, cam))
     dt_control_log(_("camera doesn't support autofocus half-press, "
                      "can't trigger autofocus"));
+}
+
+static void _camera_autofocus_status_changed(const dt_camera_t *camera,
+                                             dt_camctl_af_state_t state,
+                                             void *data)
+{
+  switch(state)
+  {
+    case DT_CAMCTL_AF_SEARCHING: dt_control_log(_("autofocus: searching")); break;
+    case DT_CAMCTL_AF_TRACKING: dt_control_log(_("autofocus: tracking")); break;
+    case DT_CAMCTL_AF_ACQUIRED: dt_control_log(_("autofocus: acquired")); break;
+    case DT_CAMCTL_AF_FAILED: dt_control_log(_("autofocus: failed")); break;
+    default: break;
+  }
 }
 
 static void _focus_nudge_clicked(GtkWidget *widget, gpointer user_data)
@@ -253,7 +268,7 @@ static void _focus_bracket_button_clicked(GtkWidget *widget, gpointer user_data)
 
   dt_control_add_job(DT_JOB_QUEUE_USER_FG,
                      dt_camera_focus_bracket_job_create(frames, step, near, settle_ms,
-                                                        prefocus, DT_CAMERA_AF_HALFPRESS_HOLD_MS));
+                                                        prefocus));
 }
 
 static gboolean _bailout_of_tethering(gpointer user_data)
@@ -510,6 +525,7 @@ void gui_init(dt_lib_module_t *self)
   lib->data.listener = calloc(1, sizeof(dt_camctl_listener_t));
   lib->data.listener->data = lib;
   lib->data.listener->camera_error = _camera_error_callback;
+  lib->data.listener->camera_autofocus_status_changed = _camera_autofocus_status_changed;
   lib->data.listener->camera_property_value_changed = _camera_property_value_changed;
   lib->data.listener->camera_property_accessibility_changed = _camera_property_accessibility_changed;
 
@@ -600,7 +616,7 @@ void gui_init(dt_lib_module_t *self)
   gtk_grid_attach(GTK_GRID(self->widget), GTK_WIDGET(label), 0, lib->gui.rows++, 2, 1);
 
   lib->gui.af_button = dt_action_button_new(self, N_("autofocus"), _af_button_clicked, lib,
-                                            _("trigger autofocus (shutter half-press)"), 0, 0);
+                                            _("hold autofocus half-press; click again to release"), 0, 0);
   lib->gui.focus_near_button = dtgtk_button_new(dtgtk_cairo_paint_arrow, CPF_DIRECTION_LEFT, NULL);
   lib->gui.focus_far_button = dtgtk_button_new(dtgtk_cairo_paint_arrow, CPF_DIRECTION_RIGHT, NULL);
   gtk_widget_set_tooltip_text(lib->gui.focus_near_button, _("nudge focus nearer"));

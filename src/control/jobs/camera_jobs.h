@@ -43,14 +43,12 @@ dt_job_t *dt_camera_import_job_create(GList *images, struct dt_camera_t *camera,
  *   far is positive)
  * \param settle_ms delay in milliseconds between the focus move and the next capture
  * \param prefocus TRUE to run an autofocus half-press before the first capture
- * \param af_hold_ms hold time in milliseconds for the optional prefocus half-press
  */
 dt_job_t *dt_camera_focus_bracket_job_create(const uint32_t frames,
                                              const uint32_t step,
                                              const gboolean near,
                                              const uint32_t settle_ms,
-                                             const gboolean prefocus,
-                                             const uint32_t af_hold_ms);
+                                             const gboolean prefocus);
 
 // clang-format off
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.py

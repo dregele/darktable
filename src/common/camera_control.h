@@ -41,6 +41,16 @@
 #define DT_CAMCTL_MANUALFOCUS_STEP_MIN 1
 #define DT_CAMCTL_MANUALFOCUS_STEP_MAX 7
 
+/** autofocus status reported by the camera while a half-press is held */
+typedef enum dt_camctl_af_state_t
+{
+  DT_CAMCTL_AF_UNKNOWN,
+  DT_CAMCTL_AF_SEARCHING,
+  DT_CAMCTL_AF_TRACKING,
+  DT_CAMCTL_AF_ACQUIRED,
+  DT_CAMCTL_AF_FAILED
+} dt_camctl_af_state_t;
+
 /** A camera object used for camera actions and callbacks */
 typedef struct dt_camera_t
 {
@@ -125,6 +135,11 @@ typedef struct dt_camera_t
   dt_pthread_mutex_t live_view_buffer_mutex;
   /** A flag to tell the live view thread that the last job was completed */
   dt_pthread_mutex_t live_view_synch;
+  /** requested half-press state, guarded by jobqueue_lock */
+  gboolean is_af_halfpressed;
+  /** actual half-press and focus state, owned by the camera worker */
+  gboolean af_status_polling;
+  dt_camctl_af_state_t af_state;
 
   /** Guards capture_done below. */
   GMutex capture_done_mutex;
@@ -274,6 +289,11 @@ typedef struct dt_camctl_listener_t
   void (*camera_disconnected)(const dt_camera_t *camera, void *data);
   /** Invoked when a error occurred \see dt_camera_error_t */
   void (*camera_error)(const dt_camera_t *camera, dt_camera_error_t error, void *data);
+  /** invoked on the camera worker when autofocus status changes
+   * callbacks must not unregister listeners or wait for camera jobs */
+  void (*camera_autofocus_status_changed)(const dt_camera_t *camera,
+                                          dt_camctl_af_state_t state,
+                                          void *data);
 } dt_camctl_listener_t;
 
 
@@ -366,16 +386,18 @@ void dt_camctl_camera_set_property_float(const dt_camctl_t *c,
                                          const dt_camera_t *cam,
                                          const char *property_name,
                                          const float value);
-/** Trigger autofocus using shutter half-press emulation, the only AF
- * trigger strategy supported by Sony bodies over PTP (there is no
- * separate "run autofocus" action, only the "autofocus" toggle mapped to
- * PTP_DPC_SONY_ShutterHalfRelease). Begins the half-press immediately and
- * schedules the release after \p hold_ms milliseconds on the glib main
- * loop. \param cam Pointer to dt_camera_t if NULL the camctl->active_camera is used.
- * \return FALSE (and does nothing) if the camera doesn't expose the "autofocus" property. */
-gboolean dt_camctl_camera_trigger_af_halfpress(const dt_camctl_t *c,
-                                               const dt_camera_t *cam,
-                                               const int hold_ms);
+/** start autofocus using shutter half-press emulation and hold it until
+ * dt_camctl_camera_release_af_halfpress() is called
+ * NULL selects the active camera; the camera must be tethering
+ * TRUE means the request was queued, not that focus was acquired
+ * status callbacks report camera results asynchronously, with unsupported
+ * or unrecognized focus indication remaining unknown */
+gboolean dt_camctl_camera_start_af_halfpress(const dt_camctl_t *c,
+                                             dt_camera_t *cam);
+/** queue release of a previously started autofocus half-press
+ * NULL selects the active camera; safe if no half-press is held */
+void dt_camctl_camera_release_af_halfpress(const dt_camctl_t *c,
+                                           dt_camera_t *cam);
 /** Get a property value from cached configuration. \param cam Pointer to dt_camera_t if NULL the
  * camctl->active_camera is used. */
 const char *dt_camctl_camera_get_property(const dt_camctl_t *c,

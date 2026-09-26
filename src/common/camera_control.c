@@ -107,6 +107,7 @@ typedef enum _camctl_camera_job_type_t
   /** For some reason stopping live view needs to pass an int, not a string. */
   _JOB_TYPE_SET_PROPERTY_INT,
   _JOB_TYPE_SET_PROPERTY_FLOAT,
+  _JOB_TYPE_AF_HALFPRESS,
   /** gets a property from config cache. \todo This shouldn't be a job in jobqueue !?  */
   _JOB_TYPE_GET_PROPERTY
 } _camctl_camera_job_type_t;
@@ -372,6 +373,72 @@ static int _camera_capture_retry(const dt_camctl_t *c,
   return res;
 }
 
+static void _camera_af_notify(const dt_camctl_t *c, dt_camera_t *cam,
+                              const dt_camctl_af_state_t state)
+{
+  if(cam->af_state == state) return;
+  cam->af_state = state;
+  dt_camctl_t *camctl = (dt_camctl_t *)c;
+  dt_pthread_mutex_lock(&camctl->listeners_lock);
+  for(GList *item = camctl->listeners; item; item = item->next)
+  {
+    dt_camctl_listener_t *listener = item->data;
+    if(listener->camera_autofocus_status_changed)
+      listener->camera_autofocus_status_changed(cam, state, listener->data);
+  }
+  dt_pthread_mutex_unlock(&camctl->listeners_lock);
+}
+
+static void _camera_af_set(const dt_camctl_t *c, dt_camera_t *cam, const int pressed)
+{
+  CameraWidget *widget = NULL;
+  CameraWidgetType type;
+  int result = gp_camera_get_single_config(cam->gpcam, "autofocus", &widget, c->gpcontext);
+  if(result == GP_OK) result = gp_widget_get_type(widget, &type);
+  if(result == GP_OK && type != GP_WIDGET_TOGGLE) result = GP_ERROR_NOT_SUPPORTED;
+  if(result == GP_OK) result = gp_widget_set_value(widget, &pressed);
+  if(result == GP_OK) result = _camera_set_single_config_retry(c, cam, "autofocus", widget);
+  if(widget) gp_widget_free(widget);
+  if(result == GP_OK) cam->af_status_polling = pressed;
+  if(result != GP_OK)
+    _camera_af_notify(c, cam, DT_CAMCTL_AF_FAILED);
+  else
+    _camera_af_notify(c, cam, DT_CAMCTL_AF_UNKNOWN);
+}
+
+static void _camera_af_poll(const dt_camctl_t *c, dt_camera_t *cam)
+{
+  if(!cam->af_status_polling) return;
+  CameraWidget *widget = NULL;
+  CameraWidgetType type;
+  const char *value = NULL;
+  dt_camctl_af_state_t state = DT_CAMCTL_AF_UNKNOWN;
+  if(gp_camera_get_single_config(cam->gpcam, "focusindication", &widget, c->gpcontext) == GP_OK
+     && gp_widget_get_type(widget, &type) == GP_OK
+     && (type == GP_WIDGET_RADIO || type == GP_WIDGET_MENU || type == GP_WIDGET_TEXT)
+     && gp_widget_get_value(widget, &value) == GP_OK && value)
+  {
+    // libgphoto2 translates the Sony focus indication values
+    const struct { const char *value; dt_camctl_af_state_t state; } states[] = {
+      { "Unlock", DT_CAMCTL_AF_SEARCHING },
+      { "Focus Locked", DT_CAMCTL_AF_ACQUIRED },
+      { "No Focus - Low Contrast", DT_CAMCTL_AF_FAILED },
+      { "Tracking Acquire", DT_CAMCTL_AF_TRACKING },
+      { "Tracking Focused", DT_CAMCTL_AF_ACQUIRED },
+      { "Tracking No Focus - Low Contrast", DT_CAMCTL_AF_FAILED }
+    };
+    for(size_t i = 0; i < G_N_ELEMENTS(states); i++)
+      if(!strcmp(value, states[i].value)
+         || !strcmp(value, dgettext("libgphoto2-6", states[i].value)))
+      {
+        state = states[i].state;
+        break;
+      }
+  }
+  if(widget) gp_widget_free(widget);
+  _camera_af_notify(c, cam, state);
+}
+
 static void _camera_process_job(const dt_camctl_t *c,
                                 const dt_camera_t *camera,
                                 gpointer job)
@@ -380,6 +447,10 @@ static void _camera_process_job(const dt_camctl_t *c,
   _camctl_camera_job_t *j = (_camctl_camera_job_t *)job;
   switch(j->type)
   {
+
+    case _JOB_TYPE_AF_HALFPRESS:
+      _camera_af_set(c, cam, ((_camctl_camera_set_property_int_job_t *)job)->value);
+      break;
 
     case _JOB_TYPE_EXECUTE_CAPTURE:
     {
@@ -864,6 +935,8 @@ void dt_camctl_destroy(dt_camctl_t *camctl)
   if(!camctl) return;
   // Go thru all c->cameras and release them..
   dt_print(DT_DEBUG_CAMCTL, "[camera_control] destroy darktable camcontrol");
+  if(camctl->active_camera && camctl->active_camera->is_tethering)
+    dt_camctl_tether_mode(camctl, camctl->active_camera, FALSE);
   gp_context_cancel(camctl->gpcontext);
 
   for(GList *it = camctl->cameras; it; it = g_list_delete_link(it, it))
@@ -1191,12 +1264,12 @@ static void *_camera_event_thread(void *data)
 
   dt_pthread_setname("tethering");
 
-  const dt_camera_t *camera = camctl->active_camera;
+  dt_camera_t *camera = (dt_camera_t *)camctl->active_camera;
 
   dt_print(DT_DEBUG_CAMCTL,
            "[camera_control] starting camera event thread of context %p", data);
 
-  while(camera->is_tethering)
+  while(g_atomic_int_get(&camera->is_tethering))
   {
     // Poll event from camera
     _camera_poll_events(camctl, camera);
@@ -1205,7 +1278,24 @@ static void *_camera_event_thread(void *data)
     gpointer job;
     while((job = _camera_get_job(camctl, camera)) != NULL)
       _camera_process_job(camctl, camera, job);
+    _camera_af_poll(camctl, camera);
   }
+  dt_pthread_mutex_lock(&camera->jobqueue_lock);
+  const gboolean release_af = camera->is_af_halfpressed || camera->af_status_polling;
+  camera->is_af_halfpressed = FALSE;
+  for(GList *item = camera->jobqueue; item; )
+  {
+    GList *next = item->next;
+    _camctl_camera_job_t *job = item->data;
+    if(job->type == _JOB_TYPE_AF_HALFPRESS)
+    {
+      camera->jobqueue = g_list_delete_link(camera->jobqueue, item);
+      g_free(job);
+    }
+    item = next;
+  }
+  dt_pthread_mutex_unlock(&camera->jobqueue_lock);
+  if(release_af) _camera_af_set(camctl, camera, 0);
 
   dt_print(DT_DEBUG_CAMCTL, "[camera_control] exiting camera thread.");
 
@@ -1724,16 +1814,16 @@ void dt_camctl_tether_mode(const dt_camctl_t *c,
       // Start up camera event polling thread
       dt_print(DT_DEBUG_CAMCTL, "[camera_control] enabling tether mode");
       camctl->active_camera = camera;
-      camera->is_tethering = TRUE;
+      g_atomic_int_set(&camera->is_tethering, TRUE);
       dt_pthread_create(&camctl->camera_event_thread, &_camera_event_thread, (void *)c);
     }
-    else
+    else if(!enable && camera->is_tethering)
     {
       camera->is_live_viewing = FALSE;
-      camera->is_tethering = FALSE;
+      g_atomic_int_set(&camera->is_tethering, FALSE);
       dt_print(DT_DEBUG_CAMCTL, "[camera_control] disabling tether mode");
+      dt_pthread_join(camctl->camera_event_thread);
       _camctl_unlock(c);
-      // Wait for tether thread with join??
     }
   }
   else
@@ -1972,34 +2062,46 @@ void dt_camctl_camera_set_property_float(const dt_camctl_t *c,
   _camera_add_job(camctl, camera, job);
 }
 
-typedef struct _af_halfpress_ctx_t
+gboolean dt_camctl_camera_start_af_halfpress(const dt_camctl_t *c,
+                                             dt_camera_t *cam)
 {
-  const dt_camctl_t *c;
-  const dt_camera_t *cam;
-} _af_halfpress_ctx_t;
-
-static gboolean _af_halfpress_end(gpointer user_data)
-{
-  _af_halfpress_ctx_t *ctx = (_af_halfpress_ctx_t *)user_data;
-  dt_camctl_camera_set_property_int(ctx->c, ctx->cam, "autofocus", 0);
-  g_free(ctx);
-  return G_SOURCE_REMOVE;
+  if(!c) return FALSE;
+  if(!cam) cam = (dt_camera_t *)c->active_camera;
+  if(!cam || !g_atomic_int_get(&cam->is_tethering)
+     || !dt_camctl_camera_property_exists(c, cam, "autofocus")) return FALSE;
+  dt_pthread_mutex_lock(&cam->jobqueue_lock);
+  if(!g_atomic_int_get(&cam->is_tethering))
+  {
+    dt_pthread_mutex_unlock(&cam->jobqueue_lock);
+    return FALSE;
+  }
+  if(!cam->is_af_halfpressed)
+  {
+    _camctl_camera_set_property_int_job_t *job = g_malloc0(sizeof(*job));
+    job->type = _JOB_TYPE_AF_HALFPRESS;
+    job->value = 1;
+    cam->jobqueue = g_list_append(cam->jobqueue, job);
+    cam->is_af_halfpressed = TRUE;
+  }
+  dt_pthread_mutex_unlock(&cam->jobqueue_lock);
+  return TRUE;
 }
 
-gboolean dt_camctl_camera_trigger_af_halfpress(const dt_camctl_t *c,
-                                               const dt_camera_t *cam,
-                                               const int hold_ms)
+void dt_camctl_camera_release_af_halfpress(const dt_camctl_t *c,
+                                           dt_camera_t *cam)
 {
-  if(!dt_camctl_camera_property_exists(c, cam, "autofocus"))
-    return FALSE;
-
-  dt_camctl_camera_set_property_int(c, cam, "autofocus", 1);
-
-  _af_halfpress_ctx_t *ctx = g_malloc(sizeof(_af_halfpress_ctx_t));
-  ctx->c = c;
-  ctx->cam = cam;
-  g_timeout_add(hold_ms, _af_halfpress_end, ctx);
-  return TRUE;
+  if(!c) return;
+  if(!cam) cam = (dt_camera_t *)c->active_camera;
+  if(!cam || !g_atomic_int_get(&cam->is_tethering)) return;
+  dt_pthread_mutex_lock(&cam->jobqueue_lock);
+  if(g_atomic_int_get(&cam->is_tethering) && cam->is_af_halfpressed)
+  {
+    _camctl_camera_set_property_int_job_t *job = g_malloc0(sizeof(*job));
+    job->type = _JOB_TYPE_AF_HALFPRESS;
+    cam->jobqueue = g_list_append(cam->jobqueue, job);
+    cam->is_af_halfpressed = FALSE;
+  }
+  dt_pthread_mutex_unlock(&cam->jobqueue_lock);
 }
 
 
