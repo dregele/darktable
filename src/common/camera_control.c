@@ -37,6 +37,23 @@
 #define DT_CAMCTL_BUSY_RETRY_MAX_TRIES 5
 #define DT_CAMCTL_BUSY_RETRY_BACKOFF_US 150000 // 150ms
 
+/** After triggering a capture we don't know in advance how long the camera
+    will keep sending PTP events (property echoes, object-in-memory status,
+    ...) while it finishes writing/processing the shot -- this varies with
+    exposure time, buffer state, card speed etc. and cannot be bounded by a
+    single fixed delay. Instead we keep pumping gp_camera_wait_for_event()
+    and only declare the camera "idle" once it has produced zero events for
+    a full quiet period; any event (of any type) resets the quiet timer.
+    GP_EVENT_CAPTURE_COMPLETE, when the driver emits it, short-circuits this
+    immediately since it is an explicit "last capture is complete" signal.
+    DT_CAMCTL_CAPTURE_MAX_WAIT_MS is only a safety net against a camera/driver
+    that never quiesces (or a lost event) so we never block forever; hitting
+    it is logged because it means we genuinely don't know the camera's state,
+    not that we waited "long enough". */
+#define DT_CAMCTL_CAPTURE_POLL_MS 200
+#define DT_CAMCTL_CAPTURE_QUIET_MS 700
+#define DT_CAMCTL_CAPTURE_MAX_WAIT_MS 8000
+
 /** Runs \p op up to DT_CAMCTL_BUSY_RETRY_MAX_TRIES times, retrying with a
     short sleep as long as it keeps returning GP_ERROR_CAMERA_BUSY, and
     stores the last result in \p res_var. \p what is used in the retry
@@ -140,6 +157,17 @@ static gboolean _camera_initialize(const dt_camctl_t *c,
 /** Poll camera events, this one is called from the thread handling the camera. */
 static void _camera_poll_events(const dt_camctl_t *c,
                                 const dt_camera_t *cam);
+/** Handles a single already-received gphoto2 event (property change,
+ * file added, ...). Shared by _camera_poll_events() and
+ * _camera_wait_until_idle() so the two don't duplicate event parsing. */
+static void _camera_handle_event(const dt_camctl_t *c,
+                                 const dt_camera_t *cam,
+                                 CameraEventType event,
+                                 gpointer data);
+/** Blocks (from the single-threaded job-processing context only) until the
+ * camera has gone quiet after a capture. \see dt_camctl_camera_wait_for_capture() */
+static void _camera_wait_until_idle(const dt_camctl_t *c,
+                                    const dt_camera_t *cam);
 
 /** Lock camera control and notify listener. \note Locks mutex and
  * signals CAMERA_CONTROL_BUSY. \remarks all interface functions
@@ -366,7 +394,7 @@ static void _camera_process_job(const dt_camctl_t *c,
         if(!output_path) output_path = "/tmp";
 
         const char *fname = _dispatch_request_image_filename(c, fp.name, NULL, cam);
-        if(!fname) break;
+        if(!fname) goto capture_done_wait;
 
         char *output = g_build_filename(output_path, fname, (char *)NULL);
 
@@ -395,6 +423,14 @@ static void _camera_process_job(const dt_camctl_t *c,
         dt_print(DT_DEBUG_CAMCTL,
                  "[camera_control] capture job failed to capture image: %s",
                  gp_result_as_string(res));
+
+capture_done_wait:
+      // Whether the capture above succeeded or not, the camera may still be
+      // busy internally (writing to card, updating buffers, etc.) -- do not
+      // let the next queued job (e.g. the next focus step or capture of a
+      // focus-bracketing sequence) run until it has confirmed it is done.
+      // See _camera_wait_until_idle() for why this isn't just a fixed sleep.
+      _camera_wait_until_idle(c, camera);
     }
     break;
 
@@ -792,6 +828,8 @@ static void _camctl_camera_destroy_struct(dt_camera_t *cam)
   dt_pthread_mutex_destroy(&cam->config_lock);
   dt_pthread_mutex_destroy(&cam->live_view_buffer_mutex);
   dt_pthread_mutex_destroy(&cam->live_view_synch);
+  g_mutex_clear(&cam->capture_done_mutex);
+  g_cond_clear(&cam->capture_done_cond);
   // TODO: cam->jobqueue
   g_free(cam);
 }
@@ -2153,9 +2191,56 @@ void dt_camctl_camera_capture(const dt_camctl_t *c,
   }
   dt_camera_t *camera = (dt_camera_t *)cam;
 
+  // Mark busy *before* queuing, on the caller's thread: this guarantees that
+  // if the caller immediately calls dt_camctl_camera_wait_for_capture() right
+  // after this returns, it cannot race with the job queue and observe a
+  // stale "done" from a previous capture.
+  g_mutex_lock(&camera->capture_done_mutex);
+  camera->capture_done = FALSE;
+  g_mutex_unlock(&camera->capture_done_mutex);
+
   _camctl_camera_job_t *job = g_malloc(sizeof(_camctl_camera_job_t));
   job->type = _JOB_TYPE_EXECUTE_CAPTURE;
   _camera_add_job(camctl, camera, job);
+}
+
+gboolean dt_camctl_camera_wait_for_capture(const dt_camctl_t *c,
+                                           const dt_camera_t *cam,
+                                           const int timeout_ms)
+{
+  dt_camctl_t *camctl = (dt_camctl_t *)c;
+  if(!cam
+     && (cam = camctl->active_camera) == NULL
+     && (cam = camctl->wanted_camera) == NULL)
+  {
+    dt_print(DT_DEBUG_CAMCTL,
+             "[camera_control] failed to wait for capture, camera==NULL");
+    return FALSE;
+  }
+  dt_camera_t *camera = (dt_camera_t *)cam;
+
+  const gint64 end_time = g_get_monotonic_time() + (gint64)timeout_ms * 1000;
+
+  g_mutex_lock(&camera->capture_done_mutex);
+  gboolean done = camera->capture_done;
+  while(!done)
+  {
+    if(!g_cond_wait_until(&camera->capture_done_cond,
+                          &camera->capture_done_mutex, end_time))
+    {
+      done = camera->capture_done; // one last check to avoid a spurious-wakeup race
+      break;
+    }
+    done = camera->capture_done;
+  }
+  g_mutex_unlock(&camera->capture_done_mutex);
+
+  if(!done)
+    dt_print(DT_DEBUG_CAMCTL,
+             "[camera_control] timed out after %dms waiting for %s to confirm"
+             " capture completion", timeout_ms, camera->model);
+
+  return done;
 }
 
 static void _camera_poll_events(const dt_camctl_t *c,
@@ -2164,7 +2249,14 @@ static void _camera_poll_events(const dt_camctl_t *c,
   CameraEventType event;
   gpointer data;
   if(gp_camera_wait_for_event(cam->gpcam, 30, &event, &data, c->gpcontext) == GP_OK)
-  {
+    _camera_handle_event(c, cam, event, data);
+}
+
+static void _camera_handle_event(const dt_camctl_t *c,
+                                 const dt_camera_t *cam,
+                                 CameraEventType event,
+                                 gpointer data)
+{
     if(event == GP_EVENT_UNKNOWN)
     {
       /* this is really some undefined behavior, seems like it's
@@ -2258,7 +2350,86 @@ static void _camera_poll_events(const dt_camctl_t *c,
         g_free(output);
       }
     }
+}
+
+/** After a capture has been triggered and (if applicable) its file
+ * downloaded, keep pumping gp_camera_wait_for_event() -- routing every
+ * received event through the normal handler so property cache updates and
+ * FILE_ADDED downloads still happen -- until either:
+ *   - GP_EVENT_CAPTURE_COMPLETE is received (explicit "done" signal), or
+ *   - the camera has produced no event at all for DT_CAMCTL_CAPTURE_QUIET_MS
+ *     (it has gone quiet, i.e. finished whatever internal processing was
+ *     generating those events), or
+ *   - DT_CAMCTL_CAPTURE_MAX_WAIT_MS total has elapsed (safety net).
+ * Marks cam->capture_done and wakes any waiter either way; the caller
+ * (dt_camctl_camera_wait_for_capture()) distinguishes a confirmed-idle
+ * return from a timed-out one via that function's own return value, using
+ * this function's log message as the only signal of *why* it stopped.
+ * \note Only ever call this from the single camera-event/job-processing
+ * thread: it calls gp_camera_wait_for_event() directly, and must not race
+ * with _camera_poll_events() doing the same on the same Camera*. */
+static void _camera_wait_until_idle(const dt_camctl_t *c,
+                                    const dt_camera_t *cam)
+{
+  dt_camera_t *camera = (dt_camera_t *)cam;
+  double quiet_since = dt_get_wtime();
+  const double start = quiet_since;
+
+  while(TRUE)
+  {
+    const double now = dt_get_wtime();
+    const double elapsed_ms = (now - start) * 1000.0;
+    const double quiet_ms = (now - quiet_since) * 1000.0;
+
+    if(quiet_ms >= DT_CAMCTL_CAPTURE_QUIET_MS)
+      break; // camera has gone quiet: confirmed idle
+
+    if(elapsed_ms >= DT_CAMCTL_CAPTURE_MAX_WAIT_MS)
+    {
+      dt_print(DT_DEBUG_CAMCTL,
+               "[camera_control] gave up waiting %dms for %s to go idle after "
+               "capture, camera is still sending events -- proceeding anyway, "
+               "next command may still hit a busy/crash condition",
+               DT_CAMCTL_CAPTURE_MAX_WAIT_MS, camera->model);
+      break;
+    }
+
+    CameraEventType event;
+    gpointer data = NULL;
+    const int poll_ms = (int)MIN(DT_CAMCTL_CAPTURE_POLL_MS,
+                                 DT_CAMCTL_CAPTURE_QUIET_MS - quiet_ms);
+    const int res = gp_camera_wait_for_event(camera->gpcam,
+                                             poll_ms > 0 ? poll_ms : 1,
+                                             &event, &data, c->gpcontext);
+    if(res != GP_OK)
+    {
+      // treat a wait error the same as a timeout: we can't observe the
+      // camera's state right now, don't spin hot on it.
+      g_usleep(DT_CAMCTL_CAPTURE_POLL_MS * 1000);
+      continue;
+    }
+
+    if(event == GP_EVENT_TIMEOUT)
+      continue; // no reset of quiet_since -- this is exactly what we want
+
+    if(event == GP_EVENT_CAPTURE_COMPLETE)
+    {
+      dt_print(DT_DEBUG_CAMCTL,
+               "[camera_control] %s reported capture complete", camera->model);
+      break;
+    }
+
+    // any other event (property changed, file added, unknown) means the
+    // camera is still doing something -- handle it normally and reset the
+    // quiet timer so we keep waiting.
+    _camera_handle_event(c, cam, event, data);
+    quiet_since = dt_get_wtime();
   }
+
+  g_mutex_lock(&camera->capture_done_mutex);
+  camera->capture_done = TRUE;
+  g_cond_broadcast(&camera->capture_done_cond);
+  g_mutex_unlock(&camera->capture_done_mutex);
 }
 
 

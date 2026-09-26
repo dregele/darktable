@@ -125,6 +125,18 @@ typedef struct dt_camera_t
   dt_pthread_mutex_t live_view_buffer_mutex;
   /** A flag to tell the live view thread that the last job was completed */
   dt_pthread_mutex_t live_view_synch;
+
+  /** Guards capture_done below. */
+  GMutex capture_done_mutex;
+  /** Signaled every time capture_done transitions to TRUE. */
+  GCond capture_done_cond;
+  /** FALSE from the moment a capture job is queued until the camera has been
+   * observed (via gphoto2 events, see _camera_wait_until_idle()) to have gone
+   * quiet again -- i.e. it is done writing/processing the shot and it is safe
+   * to send the next command (next focus step, next capture, ...) without
+   * risking a busy-related crash on Sony bodies during focus bracketing.
+   * \see dt_camctl_camera_wait_for_capture() */
+  gboolean capture_done;
 } dt_camera_t;
 
 /** A dummy camera object used for unused cameras */
@@ -311,6 +323,22 @@ GList *dt_camctl_get_images_list(const dt_camctl_t *c, dt_camera_t *cam);
 GdkPixbuf *dt_camctl_get_thumbnail(const dt_camctl_t *c, dt_camera_t *cam, const gchar *filename);
 /** Execute remote capture of camera.*/
 void dt_camctl_camera_capture(const dt_camctl_t *c, const dt_camera_t *cam);
+
+/** Blocks the calling thread until the camera can be confirmed, via gphoto2
+ * events, to have gone idle again after the most recently queued capture --
+ * i.e. it is done writing/transferring the image and it is safe to send the
+ * next command. This is the robust replacement for sleeping a fixed delay or
+ * relying solely on a capped GP_ERROR_CAMERA_BUSY retry between focus steps
+ * of a focus-bracketing sequence: it does not return "done" until the camera
+ * itself says so, and only falls back to a generous safety-net timeout if
+ * the camera never reports readiness (logged, since that indicates a genuine
+ * problem rather than "wait longer").
+ * \param cam Pointer to dt_camera_t if NULL the camctl->active_camera is used.
+ * \param timeout_ms hard upper bound on how long to wait.
+ * \return TRUE if the camera confirmed idle, FALSE if timeout_ms elapsed first. */
+gboolean dt_camctl_camera_wait_for_capture(const dt_camctl_t *c,
+                                           const dt_camera_t *cam,
+                                           const int timeout_ms);
 /** Start live view of camera.*/
 gboolean dt_camctl_camera_start_live_view(const dt_camctl_t *c);
 /** Stop live view of camera.*/
